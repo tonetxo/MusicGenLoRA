@@ -1,0 +1,17 @@
+# requirements.txt
+
+# --- Core ML stack con CUDA 12 ---
+torch
+torchaudio
+torchvision
+
+# --- Hugging Face ecosystem ---
+transformers
+accelerate
+datasets
+peft
+bitsandbytes
+
+# --- App & Data Prep ---
+gradio
+librosa
