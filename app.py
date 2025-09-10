@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 # app.py (Versión 4.6 – Caption completo + Flash‑Attention + arquitectura estable)
 
@@ -359,23 +358,7 @@ def _extract_description(raw: Any) -> str:
 def generate_metadata(dataset_dir: str) -> str:
     """
     Recorre `dataset_dir` y crea un `metadata.jsonl` con el **formato completo**
-    que indicas:
-
-    {
-        "key": "",
-        "artist": "Voyager I",
-        "sample_rate": 44100,
-        "file_extension": "mp3",
-        "description": "<caption>",
-        "keywords": "",
-        "duration": 20.0,
-        "bpm": "",
-        "genre": "electronic",
-        "title": "Untitled song",
-        "name": "electro_2",
-        "instrument": "Mix",
-        "moods": []
-    }
+    que indicas.
     """
     if not tagger_loaded:
         return "❌ El modelo de audio‑tagging no está disponible. Revisa los logs."
@@ -384,7 +367,6 @@ def generate_metadata(dataset_dir: str) -> str:
     if not root.is_dir():
         return f"❌ Ruta de dataset inválida: {dataset_dir}"
 
-    # Extensiones soportadas por librosa (utilizadas internamente por el tagger)
     exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
     audio_files = sorted([p for p in root.iterdir() if p.suffix.lower() in exts])
     if not audio_files:
@@ -395,17 +377,12 @@ def generate_metadata(dataset_dir: str) -> str:
         for audio_path in tqdm.tqdm(
             audio_files, desc="Generando metadata con captioning.py"
         ):
-            # ---------------------------------------------- #
-            # 1️⃣  Ejecutamos el tagger (varios intentos)
-            # ---------------------------------------------- #
             try:
                 raw_res = tagger.process_audio_file(str(audio_path))
             except AttributeError:
-                # fallback a __call__
                 try:
                     raw_res = tagger(str(audio_path))
                 except Exception:
-                    # fallback a método alternativo (si existe)
                     raw_res = getattr(
                         tagger, "generate_caption_from_file", lambda x: {}
                     )(str(audio_path))
@@ -414,10 +391,6 @@ def generate_metadata(dataset_dir: str) -> str:
                 f"Salida raw del tagger para {audio_path.name}: {raw_res}"
             )
 
-            # ---------------------------------------------- #
-            # 2️⃣  Construimos el diccionario con TODOS los campos
-            # ---------------------------------------------- #
-            # a) Propiedades del archivo de audio
             try:
                 y, sr = librosa.load(str(audio_path), sr=None, mono=False)
                 duration = float(librosa.get_duration(y=y, sr=sr))
@@ -426,7 +399,6 @@ def generate_metadata(dataset_dir: str) -> str:
                 sr = 44100
                 duration = 0.0
 
-            # b) Caption (campo `description`)
             if isinstance(raw_res, dict) and "error" in raw_res:
                 logger.warning(
                     f"Error del tagger en {audio_path.name}: {raw_res['error']}"
@@ -435,49 +407,30 @@ def generate_metadata(dataset_dir: str) -> str:
             else:
                 description = _extract_description(raw_res)
 
-            # c) Resto de los campos (valor fijo o derivado)
             caption_dict = {
-                "key": "",
-                "artist": "Voyager I",                     # placeholder fijo (puedes cambiar)
-                "sample_rate": int(sr),
+                "key": "", "artist": "Voyager I", "sample_rate": int(sr),
                 "file_extension": audio_path.suffix.lstrip("."),
-                "description": description,
-                "keywords": "",
-                "duration": round(duration, 2),
-                "bpm": "",
-                "genre": "electronic",                     # placeholder
-                "title": "Untitled song",                  # placeholder
-                "name": audio_path.stem,
-                "instrument": "Mix",                       # placeholder
-                "moods": [],                               # siempre lista vacía
+                "description": description, "keywords": "", "duration": round(duration, 2),
+                "bpm": "", "genre": "electronic", "title": "Untitled song",
+                "name": audio_path.stem, "instrument": "Mix", "moods": [],
             }
-
             out_f.write(json.dumps(caption_dict, ensure_ascii=False) + "\n")
 
     return f"✅ metadata.jsonl creado en: {out_path}"
 
 
 # --------------------------------------------------------------------------- #
-# ENTRENAMIENTO (DreamBooth) – ajustes menores para `description` ----------- #
+# ENTRENAMIENTO (DreamBooth) ------------------------------------------------ #
 # --------------------------------------------------------------------------- #
 def modify_and_run_training(
-    dataset_path,
-    output_dir,
-    epochs,
-    lr,
-    lora_r,
-    lora_alpha,
-    max_duration,
-    train_seed,
+    dataset_path, output_dir, epochs, lr, lora_r, lora_alpha, max_duration, train_seed
 ) -> Generator[str, None, None]:
-    # 1️⃣  Modificamos el script DreamBooth para que use `description`
     script_path = "./musicgen-dreamboothing/dreambooth_musicgen.py"
     try:
         with open(script_path, "r", encoding="utf-8") as f:
             script_content = f.read()
         script_content = re.sub(r"r=\d+", f"r={int(lora_r)}", script_content)
         script_content = re.sub(r"lora_alpha=\d+", f"lora_alpha={int(lora_alpha)}", script_content)
-        # Cambiamos la columna de texto
         script_content = re.sub(r"--text_column_name=\w+", "--text_column_name=description", script_content)
         with open(script_path, "w", encoding="utf-8") as f:
             f.write(script_content)
@@ -486,39 +439,22 @@ def modify_and_run_training(
         yield f"❌ Error al modificar script: {e}"
         return
 
-    # 2️⃣  Lanzamos el proceso de entrenamiento
     command = [
-        "accelerate",
-        "launch",
-        "dreambooth_musicgen.py",
-        f"--model_name_or_path={MODEL_ID}",
-        f"--dataset_name={dataset_path}",
-        f"--output_dir={output_dir}",
-        f"--num_train_epochs={int(epochs)}",
-        "--use_lora",
-        f"--learning_rate={lr}",
-        "--per_device_train_batch_size=1",
-        "--gradient_accumulation_steps=4",
-        "--fp16",
-        "--text_column_name=description",
-        "--target_audio_column_name=audio_filepath",
-        "--train_split_name=train",
-        "--overwrite_output_dir",
-        "--do_train",
-        "--decoder_start_token_id=2048",
-        f"--max_duration_in_seconds={int(max_duration)}",
-        "--gradient_checkpointing",
+        "accelerate", "launch", "dreambooth_musicgen.py",
+        f"--model_name_or_path={MODEL_ID}", f"--dataset_name={dataset_path}",
+        f"--output_dir={output_dir}", f"--num_train_epochs={int(epochs)}",
+        "--use_lora", f"--learning_rate={lr}", "--per_device_train_batch_size=1",
+        "--gradient_accumulation_steps=4", "--fp16", "--text_column_name=description",
+        "--target_audio_column_name=audio_filepath", "--train_split_name=train",
+        "--overwrite_output_dir", "--do_train", "--decoder_start_token_id=2048",
+        f"--max_duration_in_seconds={int(max_duration)}", "--gradient_checkpointing",
         f"--seed={int(train_seed)}",
     ]
 
     yield "🚀 Lanzando entrenamiento...\n\n"
     process = subprocess.Popen(
-        command,
-        cwd="./musicgen-dreamboothing",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
+        command, cwd="./musicgen-dreamboothing", stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True, encoding="utf-8",
     )
     for line in iter(process.stdout.readline, ""):
         yield line
@@ -530,44 +466,117 @@ def modify_and_run_training(
 
 
 # --------------------------------------------------------------------------- #
-# INFERENCIA – Gestión de LoRA (idéntica a la v4.5) ------------------------- #
+# INFERENCIA – Gestión de LoRA ---------------------------------------------- #
 # --------------------------------------------------------------------------- #
-def switch_model_and_state(lora_path: str) -> Tuple[Dict[str, Any], str]:
+def switch_model_and_state(lora_files: List[str]) -> Tuple[Dict[str, Any], str]:
     """
-    Cambia de modelo base a LoRA (o viceversa) y devuelve:
-        - nuevo estado (diccionario con `model` y `lora_path`)
-        - mensaje para la UI
+    Carga un LoRA a partir de una lista de archivos temporales de Gradio.
     """
-    logger.info(f"Cambiando modelo. Ruta LoRA: {lora_path}")
+    logger.info(f"Cambiando modelo. Archivos LoRA recibidos: {lora_files}")
 
-    # Siempre partimos del modelo base (ya está en CPU)
-    base_model.to("cuda")                # lo llevamos a GPU para poder aplicar LoRA
+    # Usar la variable global base_model
+    global base_model
+    
+    # Liberar memoria primero
+    if hasattr(base_model, 'to'):
+        base_model.to("cpu")
+    torch.cuda.empty_cache()
 
-    if lora_path and os.path.exists(lora_path):
+    # Si la lista está vacía o es None, volvemos al modelo base ORIGINAL
+    if not lora_files or all(f is None for f in lora_files):
         try:
-            active_model = PeftModel.from_pretrained(base_model, lora_path)
+            # RECREAR el modelo base desde cero para asegurar que no hay LoRA
+            logger.info("Recreando modelo base limpio...")
+            
+            # Liberar memoria del modelo actual
+            del base_model
+            torch.cuda.empty_cache()
+            
+            # Recargar el modelo base completamente desde cero
+            base_model = MusicgenForConditionalGeneration.from_pretrained(
+                MODEL_ID,
+                torch_dtype=torch.float16,
+            )
+            
+            # Reaplicar configuración de flash attention
+            if hasattr(base_model.config, "use_flash_attention_2"):
+                base_model.config.use_flash_attention_2 = True
+            if hasattr(base_model, "text_encoder"):
+                if hasattr(base_model.text_encoder.config, "use_flash_attention_2"):
+                    base_model.text_encoder.config.use_flash_attention_2 = False
+            
+            logger.info("✅ Modelo base recreado exitosamente")
+            
+        except Exception as e:
+            logger.error(f"Error recreando modelo base: {e}")
+            # Si falla, intentar cargar de nuevo el modelo
+            base_model = MusicgenForConditionalGeneration.from_pretrained(
+                MODEL_ID,
+                torch_dtype=torch.float16,
+            )
+        
+        active_model = base_model
+        status = "✅ Modelo Base Activo (limpio)"
+        new_state = {"model": base_model, "lora_path": None}
+        
+    else:
+        try:
+            # Crear un directorio temporal único para los archivos LoRA
+            import tempfile
+            import shutil
+            
+            lora_temp_dir = tempfile.mkdtemp()
+            logger.info(f"Creando directorio temporal para LoRA: {lora_temp_dir}")
+            
+            # Copiar todos los archivos al directorio temporal
+            for file_path in lora_files:
+                if file_path and file_path != "None":
+                    filename = os.path.basename(file_path)
+                    dest_path = os.path.join(lora_temp_dir, filename)
+                    shutil.copy2(file_path, dest_path)
+                    logger.info(f"Copiado {filename} a {lora_temp_dir}")
+            
+            # Verificar que tenemos los archivos necesarios
+            files_in_dir = os.listdir(lora_temp_dir)
+            logger.info(f"Archivos en directorio temporal: {files_in_dir}")
+            
+            # Asegurarse de que el modelo base esté limpio primero
+            if hasattr(base_model, 'peft_config'):
+                logger.info("Limpiando modelo base antes de cargar LoRA...")
+                del base_model
+                torch.cuda.empty_cache()
+                base_model = MusicgenForConditionalGeneration.from_pretrained(
+                    MODEL_ID,
+                    torch_dtype=torch.float16,
+                )
+            
+            # Cargar el LoRA desde el directorio temporal
+            active_model = PeftModel.from_pretrained(base_model, lora_temp_dir)
 
-            # Activamos Flash‑Attention en el LoRA (si es soportado)
             if hasattr(active_model.config, "use_flash_attention_2"):
                 active_model.config.use_flash_attention_2 = True
-            # y nos aseguramos de que el encoder de texto siga desactivado
             if hasattr(active_model, "text_encoder"):
                 if hasattr(active_model.text_encoder.config, "use_flash_attention_2"):
                     active_model.text_encoder.config.use_flash_attention_2 = False
 
-            status = f"✅ LoRA activo: {os.path.basename(lora_path)}"
-            new_state = {"model": active_model, "lora_path": lora_path}
+            status = f"✅ LoRA activo"
+            new_state = {"model": active_model, "lora_path": lora_temp_dir}
+            
         except Exception as e:
             logger.error(f"Error cargando LoRA: {e}")
+            # Limpiar el directorio temporal en caso de error
+            if 'lora_temp_dir' in locals():
+                shutil.rmtree(lora_temp_dir, ignore_errors=True)
+            
+            # Asegurarse de tener un modelo base limpio
+            base_model = MusicgenForConditionalGeneration.from_pretrained(
+                MODEL_ID,
+                torch_dtype=torch.float16,
+            )
             active_model = base_model
             status = f"❌ Error al cargar LoRA: {e}"
             new_state = {"model": base_model, "lora_path": None}
-    else:
-        active_model = base_model
-        status = "✅ Modelo Base Activo"
-        new_state = {"model": base_model, "lora_path": None}
-
-    # Liberamos la GPU hasta que se solicite generación
+    
     active_model.to("cpu")
     torch.cuda.empty_cache()
     logger.info(status)
@@ -576,7 +585,7 @@ def switch_model_and_state(lora_path: str) -> Tuple[Dict[str, Any], str]:
 
 def generate_music_with_state(
     current_state: Dict[str, Any],
-    lora_path_textbox: str,
+    lora_path_from_file_input: List[str],
     prompt: str,
     duration: int,
     seed: int,
@@ -586,27 +595,49 @@ def generate_music_with_state(
     topp: float,
 ) -> Tuple[Dict[str, Any], str, Tuple[int, Any]]:
     """
-    Genera audio gestionando el estado del modelo y cambiando LoRA si es
-    necesario.
+    Genera audio gestionando el estado del modelo y cambiando LoRA si es necesario.
     """
-    # ------------------------------------------------------------------- #
-    # 1️⃣  Cambiar LoRA si la ruta escrita difiere del LoRA cargado
-    # ------------------------------------------------------------------- #
-    if lora_path_textbox != current_state["lora_path"]:
-        new_state, status = switch_model_and_state(lora_path_textbox)
+    # Detectar si queremos volver al modelo base
+    want_base_model = (not lora_path_from_file_input or 
+                      all(f is None for f in lora_path_from_file_input))
+    
+    # Detectar si actualmente tenemos LoRA cargado
+    has_lora_loaded = current_state["lora_path"] is not None
+    
+    # Siempre forzar el cambio si queremos modelo base pero tenemos LoRA
+    if want_base_model and has_lora_loaded:
+        logger.info("Forzando cambio a modelo base...")
+        new_state, status = switch_model_and_state([])
         active_model = new_state["model"]
         current_state = new_state
+    elif not want_base_model and not has_lora_loaded:
+        # Queremos LoRA pero tenemos modelo base
+        new_state, status = switch_model_and_state(lora_path_from_file_input)
+        active_model = new_state["model"]
+        current_state = new_state
+    elif not want_base_model and has_lora_loaded:
+        # Queremos LoRA y ya tenemos uno cargado, verificar si son diferentes
+        current_files = set()
+        if current_state["lora_path"] and os.path.exists(current_state["lora_path"]):
+            current_files = set(os.listdir(current_state["lora_path"]))
+        
+        new_files = set()
+        for file_path in lora_path_from_file_input:
+            if file_path and file_path != "None":
+                new_files.add(os.path.basename(file_path))
+        
+        # Si los archivos son diferentes, necesitamos cambiar
+        if new_files != current_files:
+            new_state, status = switch_model_and_state(lora_path_from_file_input)
+            active_model = new_state["model"]
+            current_state = new_state
+        else:
+            status = f"✅ LoRA activo"
+            active_model = current_state["model"]
     else:
-        status = (
-            f"✅ LoRA activo: {os.path.basename(current_state['lora_path'])}"
-            if current_state["lora_path"]
-            else "✅ Modelo Base Activo"
-        )
+        status = "✅ Modelo Base Activo"
         active_model = current_state["model"]
 
-    # ------------------------------------------------------------------- #
-    # 2️⃣  Pasamos a GPU y generamos
-    # ------------------------------------------------------------------- #
     active_model.to("cuda")
     logger.info("Generando audio en GPU...")
 
@@ -619,18 +650,11 @@ def generate_music_with_state(
         topk = 250
 
     audio = active_model.generate(
-        **inputs,
-        max_new_tokens=int(duration * 50),
-        do_sample=True,
-        guidance_scale=guidance,
-        temperature=temp,
-        top_k=int(topk),
+        **inputs, max_new_tokens=int(duration * 50), do_sample=True,
+        guidance_scale=guidance, temperature=temp, top_k=int(topk),
         top_p=topp if topp > 0 else None,
     )
 
-    # ------------------------------------------------------------------- #
-    # 3️⃣  Volver a CPU y devolver audio
-    # ------------------------------------------------------------------- #
     active_model.to("cpu")
     torch.cuda.empty_cache()
     logger.info("✅ Generación completada, VRAM liberada")
@@ -646,16 +670,11 @@ def generate_music_with_state(
 with gr.Blocks(theme=gr.themes.Soft()) as demo:
     gr.Markdown("# 🎶 Interfaz de Entrenamiento y Generación – MusicGen v4.6")
 
-    # Estado inicial (modelo base sin LoRA)
     initial_state = {"model": base_model, "lora_path": None}
     active_model_state = gr.State(value=initial_state)
 
     with gr.Tabs() as tabs:
-        # ------------------------------------------------------------------- #
-        # 1️⃣ Entrenamiento LoRA
-        # ------------------------------------------------------------------- #
         with gr.TabItem("🛠️ Entrenar LoRA"):
-            # Ruta del dataset + botón para crear metadata
             with gr.Row():
                 prep_dataset_path_input = gr.Textbox(
                     label="📂 Ruta a la carpeta con tus audios",
@@ -667,8 +686,6 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                 metadata_output = gr.Textbox(
                     label="Resultado", lines=2, interactive=False
                 )
-
-            # Parámetros de entrenamiento
             with gr.Row():
                 output_dir_input = gr.Textbox(
                     label="📁 Carpeta de salida (LoRA)",
@@ -678,14 +695,10 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                     label="Épocas", minimum=1, maximum=100, step=1, value=settings.get("epochs", 15)
                 )
                 lr_input = gr.Number(label="Learning Rate", value=settings.get("lr", 0.0001))
-
             with gr.Row():
                 max_duration_input = gr.Slider(
                     label="Duración máx. del audio (s)",
-                    minimum=10,
-                    maximum=300,
-                    step=1,
-                    value=settings.get("max_duration", 180),
+                    minimum=10, maximum=300, step=1, value=settings.get("max_duration", 180),
                 )
                 r_input = gr.Slider(
                     label="R (rank)", minimum=4, maximum=128, step=4, value=settings.get("lora_r", 32)
@@ -693,22 +706,13 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                 alpha_input = gr.Slider(
                     label="Alpha", minimum=4, maximum=256, step=4, value=settings.get("lora_alpha", 64)
                 )
-
             train_seed_input = gr.Number(
-                label="Semilla (entrenamiento)",
-                value=settings.get("train_seed", 42),
-                precision=0,
+                label="Semilla (entrenamiento)", value=settings.get("train_seed", 42), precision=0,
             )
-            launch_train_btn = gr.Button(
-                "🚀 Lanzar entrenamiento", variant="primary"
-            )
+            launch_train_btn = gr.Button("🚀 Lanzar entrenamiento", variant="primary")
             train_log = gr.Textbox(label="Log del entrenamiento", lines=15, interactive=False)
 
-        # ------------------------------------------------------------------- #
-        # 2️⃣ Gestor de Prompts
-        # ------------------------------------------------------------------- #
         with gr.TabItem("✍️ Gestor de Prompts"):
-            # Selección / edición de prompts guardados
             with gr.Row():
                 prompt_select_dd = gr.Dropdown(
                     label="Prompts guardados", choices=prompt_manager.get_prompt_names()
@@ -717,15 +721,11 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                 save_prompt_btn = gr.Button("💾 Guardar/Actualizar")
                 delete_prompt_btn = gr.Button("🗑️ Eliminar")
                 prompt_status_tb = gr.Textbox(label="Estado", interactive=False)
-
             prompt_text_area = gr.Textbox(label="Texto del Prompt", lines=10)
-
-            # Mejora con Ollama
             with gr.Row():
                 ollama_model_dd = gr.Dropdown(
                     label="Modelo Ollama",
-                    choices=available_ollama_models,
-                    value=settings.get("ollama_model", ""),
+                    choices=available_ollama_models, value=settings.get("ollama_model", ""),
                 )
                 unload_ollama_btn = gr.Button("🗑️ Descargar modelo Ollama")
                 use_captions_cb = gr.Checkbox(
@@ -733,173 +733,94 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                     info="Lee `metadata.jsonl` de la carpeta del dataset.",
                 )
                 enhance_btn = gr.Button("🔧 Mejorar con Ollama", variant="primary")
-
-            # Botón para usar el prompt actual en el generador
             use_in_inference_btn = gr.Button("🎵 Usar este Prompt en el Generador")
 
-        # ------------------------------------------------------------------- #
-        # 3️⃣ Generador (Inferencia)
-        # ------------------------------------------------------------------- #
         with gr.TabItem("🎵 Generador (Inferencia)"):
             with gr.Row():
                 prompt_input = gr.Textbox(
                     label="Prompt musical",
                     placeholder="Ej: Un solo de piano clásico...",
-                    value=settings.get("inference_prompt", ""),
-                    lines=2,
+                    value=settings.get("inference_prompt", ""), lines=2,
                 )
-                lora_path_input = gr.Textbox(
-                    label="📂 Ruta al LoRA (vacío = modelo base)",
-                    placeholder="./musicgen-dreamboothing/mi_lora_final",
-                    value=settings.get("lora_path", ""),
+                # ---- INICIO DE LA MODIFICACIÓN ----
+                # Ahora acepta múltiples archivos (file_count="multiple")
+                lora_path_input = gr.File(
+                    label="📂 Arrastra AQUÍ AMBOS archivos LoRA (config y safetensors)",
+                    type="filepath",
+                    file_count="multiple"
                 )
+                # ---- FIN DE LA MODIFICACIÓN ----
                 inference_seed_input = gr.Number(
                     label="Semilla (-1 = aleatoria)",
-                    value=settings.get("inference_seed", -1),
-                    precision=0,
+                    value=settings.get("inference_seed", -1), precision=0,
                 )
                 generate_btn = gr.Button("🎹 Generar", variant="primary")
                 status_output = gr.Textbox(
                     label="Modelo activo", interactive=False, value="✅ Modelo Base Activo"
                 )
             duration_slider = gr.Slider(
-                label="Duración (s)",
-                minimum=5,
-                maximum=60,
-                step=1,
+                label="Duración (s)", minimum=5, maximum=60, step=1,
                 value=settings.get("inference_duration", 15),
             )
             with gr.Accordion("Ajustes avanzados", open=False):
                 guidance_slider = gr.Slider(
-                    label="Guidance Scale (CFG)",
-                    minimum=1.0,
-                    maximum=20.0,
-                    step=0.5,
-                    value=settings.get("guidance_scale", 3.0),
+                    label="Guidance Scale (CFG)", minimum=1.0, maximum=20.0,
+                    step=0.5, value=settings.get("guidance_scale", 3.0),
                 )
                 temperature_slider = gr.Slider(
-                    label="Temperatura",
-                    minimum=0.1,
-                    maximum=2.0,
-                    step=0.05,
-                    value=settings.get("temperature", 1.0),
+                    label="Temperatura", minimum=0.1, maximum=2.0,
+                    step=0.05, value=settings.get("temperature", 1.0),
                 )
                 topk_slider = gr.Slider(
-                    label="Top‑k (0 = default 250)",
-                    minimum=0,
-                    maximum=500,
-                    step=10,
-                    value=settings.get("top_k", 250),
+                    label="Top‑k (0 = default 250)", minimum=0, maximum=500,
+                    step=10, value=settings.get("top_k", 250),
                 )
                 topp_slider = gr.Slider(
-                    label="Top‑p (0 = desactivado)",
-                    minimum=0.0,
-                    maximum=1.0,
-                    step=0.05,
-                    value=settings.get("top_p", 0.0),
+                    label="Top‑p (0 = desactivado)", minimum=0.0, maximum=1.0,
+                    step=0.05, value=settings.get("top_p", 0.0),
                 )
             audio_out = gr.Audio(label="Resultado", type="numpy")
 
-    # ------------------------------------------------------------------- #
-    # CALLBACKS ----------------------------------------------------------- #
-    # ------------------------------------------------------------------- #
-    # ---- Prompt manager -------------------------------------------------
     def on_select_prompt(name):
         return prompt_manager.get_prompt_text(name)
-
     def on_save_prompt(name, text):
         msg = prompt_manager.update_prompt(name, text)
         return msg, gr.Dropdown(choices=prompt_manager.get_prompt_names(), value=name)
-
     def on_delete_prompt(name):
         msg = prompt_manager.delete_prompt(name)
         return msg, gr.Dropdown(choices=prompt_manager.get_prompt_names(), value=None)
 
     prompt_select_dd.change(fn=on_select_prompt, inputs=prompt_select_dd, outputs=prompt_text_area)
-    save_prompt_btn.click(fn=on_save_prompt,
-                          inputs=[prompt_name_tb, prompt_text_area],
-                          outputs=[prompt_status_tb, prompt_select_dd])
-    delete_prompt_btn.click(fn=on_delete_prompt,
-                            inputs=prompt_name_tb,
-                            outputs=[prompt_status_tb, prompt_select_dd])
+    save_prompt_btn.click(fn=on_save_prompt, inputs=[prompt_name_tb, prompt_text_area], outputs=[prompt_status_tb, prompt_select_dd])
+    delete_prompt_btn.click(fn=on_delete_prompt, inputs=prompt_name_tb, outputs=[prompt_status_tb, prompt_select_dd])
+    unload_ollama_btn.click(fn=ollama.unload_ollama_model, inputs=ollama_model_dd, outputs=prompt_status_tb)
+    enhance_btn.click(fn=ollama.enhance_and_translate_prompt, inputs=[ollama_model_dd, prompt_text_area, use_captions_cb, prep_dataset_path_input], outputs=prompt_text_area)
+    use_in_inference_btn.click(fn=lambda txt: (txt, gr.Tabs(selected=2)), inputs=prompt_text_area, outputs=[prompt_input, tabs])
+    generate_metadata_button.click(fn=generate_metadata, inputs=prep_dataset_path_input, outputs=metadata_output)
+    launch_train_btn.click(fn=modify_and_run_training, inputs=[prep_dataset_path_input, output_dir_input, epochs_input, lr_input, r_input, alpha_input, max_duration_input, train_seed_input], outputs=train_log)
 
-    # ---- Ollama ---------------------------------------------------------
-    unload_ollama_btn.click(fn=ollama.unload_ollama_model,
-                            inputs=ollama_model_dd,
-                            outputs=prompt_status_tb)
+    lora_path_input.change(fn=switch_model_and_state, inputs=lora_path_input, outputs=[active_model_state, status_output])
 
-    enhance_btn.click(fn=ollama.enhance_and_translate_prompt,
-                      inputs=[ollama_model_dd, prompt_text_area, use_captions_cb, prep_dataset_path_input],
-                      outputs=prompt_text_area)
-
-    # ---- Usar prompt en el generador ------------------------------------
-    use_in_inference_btn.click(fn=lambda txt: (txt, gr.Tabs(selected=2)),
-                               inputs=prompt_text_area,
-                               outputs=[prompt_input, tabs])
-
-    # ---- Generar metadata -----------------------------------------------
-    generate_metadata_button.click(fn=generate_metadata,
-                                  inputs=prep_dataset_path_input,
-                                  outputs=metadata_output)
-
-    # ---- Entrenamiento --------------------------------------------------
-    launch_train_btn.click(fn=modify_and_run_training,
-                           inputs=[
-                               prep_dataset_path_input,
-                               output_dir_input,
-                               epochs_input,
-                               lr_input,
-                               r_input,
-                               alpha_input,
-                               max_duration_input,
-                               train_seed_input,
-                           ],
-                           outputs=train_log)
-
-    # ---- Cambio de LoRA -------------------------------------------------
-    lora_path_input.submit(fn=switch_model_and_state,
-                           inputs=lora_path_input,
-                           outputs=[active_model_state, status_output])
-
-    # ---- Generación ------------------------------------------------------
     generate_btn.click(fn=generate_music_with_state,
-                       inputs=[
-                           active_model_state,
-                           lora_path_input,
-                           prompt_input,
-                           duration_slider,
-                           inference_seed_input,
-                           guidance_slider,
-                           temperature_slider,
-                           topk_slider,
-                           topp_slider,
-                       ],
-                       outputs=[active_model_state, status_output, audio_out])
+        inputs=[
+            active_model_state, lora_path_input, prompt_input, duration_slider,
+            inference_seed_input, guidance_slider, temperature_slider, topk_slider, topp_slider,
+        ],
+        outputs=[active_model_state, status_output, audio_out]
+    )
 
-    # ------------------------------------------------------------------- #
-    # Guardado de settings en tiempo real (igual que en v4.0)             #
-    # ------------------------------------------------------------------- #
     def _persist(key: str, val: Any) -> None:
         settings[key] = val
         save_settings(settings)
 
     component_key_map = [
-        (prep_dataset_path_input, "dataset_path"),
-        (output_dir_input, "output_dir"),
-        (epochs_input, "epochs"),
-        (lr_input, "lr"),
-        (max_duration_input, "max_duration"),
-        (r_input, "lora_r"),
-        (alpha_input, "lora_alpha"),
-        (train_seed_input, "train_seed"),
-        (prompt_input, "inference_prompt"),
-        (duration_slider, "inference_duration"),
-        (lora_path_input, "lora_path"),
-        (inference_seed_input, "inference_seed"),
-        (guidance_slider, "guidance_scale"),
-        (temperature_slider, "temperature"),
-        (topk_slider, "top_k"),
-        (topp_slider, "top_p"),
+        (prep_dataset_path_input, "dataset_path"), (output_dir_input, "output_dir"),
+        (epochs_input, "epochs"), (lr_input, "lr"), (max_duration_input, "max_duration"),
+        (r_input, "lora_r"), (alpha_input, "lora_alpha"), (train_seed_input, "train_seed"),
+        (prompt_input, "inference_prompt"), (duration_slider, "inference_duration"),
+        (lora_path_input, "lora_path"), (inference_seed_input, "inference_seed"),
+        (guidance_slider, "guidance_scale"), (temperature_slider, "temperature"),
+        (topk_slider, "top_k"), (topp_slider, "top_p"),
     ]
     for comp, key in component_key_map:
         comp.change(fn=lambda v, k=key: _persist(k, v), inputs=comp, outputs=None)

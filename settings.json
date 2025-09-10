@@ -10,7 +10,7 @@
     "train_seed": 42,
     "inference_prompt": "80s rock ballad with a power guitar solo",
     "inference_duration": 15,
-    "lora_path": "/mnt/datos/ModeloAudio/MusicGen/musicgen-dreamboothing/lora/prueba2",
+    "lora_path": null,
     "inference_seed": 1,
     "guidance_scale": 3,
     "temperature": 1,
