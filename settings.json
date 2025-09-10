@@ -1,9 +1,9 @@
 {
     "dataset_path": "/mnt/datos/ModeloAudio/training_data",
-    "output_dir": "./lora/prueba1",
+    "output_dir": "./lora/prueba2",
     "epochs": 30,
     "lr": 0.0001,
-    "lora_r": 8,
+    "lora_r": 16,
     "lora_alpha": 16,
     "max_duration": 180,
     "ollama_model": "gemma3:latest"
