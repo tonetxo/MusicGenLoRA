@@ -13,5 +13,10 @@
         "name": "piano ollama",
         "text": "A slow, melancholic classical piano solo played on an antique Steinway model D, accompanied by a gentle harp arpeggio in the background. The music is recorded at 90 beats per minute, with a slight vintage warmth that adds depth and richness to the sound. The piece evokes a sense of introspection, solitude, and reflective contemplation. The melody is delicate yet emotional, drawing the listener into a world of wistfulness and longing.",
         "created": "2025-09-09T22:33:02.191497"
+    },
+    {
+        "name": "deep house",
+        "text": "MusicGen Deep House Loop - Create an ambient, medium tempo deep house music track with a warm, woody timbre. Featuring piano, synthesizer, marimba, glockenspiel, and xylophone instruments, the piece should have a strong beat that evolves throughout the loop. Add elements of train sounds like a distant railroad background to create a unique ambiance. The overall mood is sad yet uplifting with soft, dynamic changes in volume and intensity.",
+        "created": "2025-09-11T00:56:53.902234"
     }
 ]

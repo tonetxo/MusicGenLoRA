@@ -1,19 +1,22 @@
 {
     "dataset_path": "/mnt/datos/ModeloAudio/training_data",
     "output_dir": "./lora/prueba4",
-    "epochs": 50,
+    "epochs": 100,
     "lr": 0.0001,
-    "lora_r": 24,
-    "lora_alpha": 24,
+    "lora_r": 32,
+    "lora_alpha": 32,
     "max_duration": 180,
     "ollama_model": "gemma3:latest",
     "train_seed": 44,
-    "inference_prompt": "80s rock ballad with a power guitar solo",
+    "inference_prompt": "Create an ambient, medium tempo deep house music track with a warm, woody timbre. Featuring piano, synthesizer, marimba, glockenspiel, and xylophone instruments, the piece should have a strong beat that evolves throughout the loop. Add elements of train sounds like a distant railroad background to create a unique ambiance. The overall mood is sad yet uplifting with soft, dynamic changes in volume and intensity.",
     "inference_duration": 15,
-    "lora_path": null,
-    "inference_seed": 2,
+    "lora_path": [
+        "/tmp/gradio/b7ae0cd2ae19b11b106751bd92d74b203ade199908d4b97e3ba06753c1897a3a/adapter_config.json",
+        "/tmp/gradio/d81cafc384098dcf72e233fc567761c91f229f3d1d4fe9551dbc5e5cd68eccf7/adapter_model.safetensors"
+    ],
+    "inference_seed": -1,
     "guidance_scale": 3,
     "temperature": 1,
-    "top_k": 250,
-    "top_p": 0
+    "top_k": 0,
+    "top_p": 0.9
 }

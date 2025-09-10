@@ -48,6 +48,7 @@ import torch
 import tqdm
 from transformers import AutoProcessor, MusicgenForConditionalGeneration
 from peft import PeftModel
+import soundfile as sf
 
 # --------------------------------------------------------------------------- #
 # IMPORT DE AUDIO‑TAGGER ------------------------------------------------------ #
@@ -528,6 +529,56 @@ def generate_metadata(dataset_dir: str) -> str:
 
     return f"✅ metadata.jsonl creado en: {out_path} (Éxito: {success_count}, Errores: {error_count})"
 
+# === NUEVA FUNCIÓN: Guardar audio generado ===
+def save_generated_audio(audio_data: Tuple[int, Any], output_dir: str = "./generated_audio") -> str:
+    """
+    Guarda el audio generado en formato WAV.
+    
+    Args:
+        audio_data: Tupla (sample_rate, audio_numpy_array) del componente gr.Audio
+        output_dir: Directorio donde guardar el audio
+    
+    Returns:
+        str: Ruta del archivo guardado o mensaje de error
+    """
+    if audio_data is None:
+        return "❌ No hay audio para guardar"
+    
+    sr, audio_np = audio_data
+    
+    if audio_np is None or len(audio_np) == 0:
+        return "❌ Audio vacío"
+    
+    # Crear directorio si no existe
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Generar nombre de archivo único
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"musicgen_generated_{timestamp}.wav"
+    filepath = os.path.join(output_dir, filename)
+    
+    try:
+        # soundfile espera (time, channels) para estéreo
+        if audio_np.ndim == 2 and audio_np.shape[1] <= 2:
+            # Ya está en formato correcto (time, channels)
+            pass
+        elif audio_np.ndim == 2 and audio_np.shape[0] <= 2:
+            # Está en (channels, time), hay que transponer
+            audio_np = audio_np.T
+        # Para mono, debe ser 1D
+        elif audio_np.ndim == 1:
+            pass # Correcto
+        else:
+            # Fallback: intentar squeeze
+            audio_np = audio_np.squeeze()
+            
+        sf.write(filepath, audio_np, sr)
+        logger.info(f"✅ Audio guardado en: {filepath}")
+        return f"✅ Guardado: {filepath}"
+    except Exception as e:
+        error_msg = f"❌ Error guardando audio: {str(e)}"
+        logger.error(error_msg)
+        return error_msg
 # --------------------------------------------------------------------------- #
 # ENTRENAMIENTO (DreamBooth) ------------------------------------------------ #
 # --------------------------------------------------------------------------- #
@@ -693,7 +744,8 @@ def switch_model_and_state(lora_files: List[str]) -> Tuple[Dict[str, Any], str]:
                 )
             except Exception as fallback_error:
                 logger.error(f"Error en fallback a modelo base: {fallback_error}")
-                raise fallback_error
+                # Último fallback - devolver el modelo base actual
+                pass
                 
             active_model = base_model
             status = f"❌ Error al cargar LoRA: {str(e)[:100]}..."
@@ -725,6 +777,10 @@ def generate_music_with_state(
     Genera audio gestionando el estado del modelo y cambiando LoRA si es necesario.
     """
     logger.info("Iniciando generación de audio...")
+
+    # Inicializar active_model con el modelo del estado actual
+    active_model = current_state["model"]
+    status = "Usando modelo actual"
 
     # Detectar si queremos volver al modelo base
     want_base_model = (not lora_path_from_file_input or 
@@ -784,7 +840,7 @@ def generate_music_with_state(
 
     # Generar audio
     with torch.no_grad():
-        audio = active_model.generate(
+        audio_codes = active_model.generate(
             **inputs,
             max_new_tokens=max_tokens,
             do_sample=True,
@@ -794,23 +850,37 @@ def generate_music_with_state(
             top_p=topp if topp > 0 else None,
         )
 
-    logger.info(f"Audio generado. Forma del tensor: {audio.shape}")
+    logger.info(f"Audio codes generado. Forma: {audio_codes.shape}")
 
     # Mover modelo de vuelta a CPU
     active_model = active_model.to("cpu")
     torch.cuda.empty_cache()
     logger.info("Modelo movido a CPU y VRAM liberada")
 
-    # Extraer audio
-    if audio.shape[0] > 0:
-        audio_np = audio[0].cpu().numpy()
-        if audio_np.ndim > 1:
-            audio_np = audio_np.T  # (time, channels)
-    else:
-        audio_np = np.zeros((32000 * duration,))  # fallback
+    # Conversión correcta del tensor a audio
+    try:
+        # Para MusicGen, el tensor generado ya es la waveform
+        if audio_codes.dim() == 3:  # (batch, channels, time)
+            audio_np = audio_codes[0].cpu().numpy()  # (channels, time)
+            if audio_np.shape[0] <= 2:  # stereo o mono
+                audio_np = audio_np.T  # (time, channels)
+            else:
+                audio_np = audio_np[0]  # mono
+        elif audio_codes.dim() == 2:  # (batch, time) o (channels, time)
+            audio_np = audio_codes[0].cpu().numpy() if audio_codes.shape[0] == 1 else audio_codes.cpu().numpy()
+            if audio_np.ndim == 2 and audio_np.shape[0] <= 2:
+                audio_np = audio_np.T
+        else:
+            audio_np = audio_codes.cpu().numpy()
+            
+    except Exception as e:
+        logger.error(f"Error en conversión de audio: {e}")
+        # Fallback seguro
+        audio_np = np.zeros((32000 * duration,))  # array de silencio
 
     sr = 32000  # MusicGen usa 32kHz
 
+    logger.info(f"Audio final convertido. Forma: {audio_np.shape}")
     logger.info("✅ Generación completada correctamente")
     return current_state, status, (sr, audio_np)
 
@@ -845,7 +915,11 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                 epochs_input = gr.Slider(
                     label="Épocas", minimum=1, maximum=100, step=1, value=settings.get("epochs", 15)
                 )
-                lr_input = gr.Number(label="Learning Rate", value=settings.get("lr", 0.0001))
+                lr_input = gr.Number(
+    		    label="Learning Rate",
+                    value=settings.get("lr", 0.0001),
+                    precision=6
+                )
             with gr.Row():
                 max_duration_input = gr.Slider(
                     label="Duración máx. del audio (s)",
@@ -931,6 +1005,17 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                     step=0.05, value=settings.get("top_p", 0.0),
                 )
             audio_out = gr.Audio(label="Resultado", type="numpy")
+                        # === AÑADE ESTO: Botón para guardar el audio ===
+            with gr.Row():
+                save_audio_btn = gr.Button("💾 Guardar Audio Generado")
+                save_output = gr.Textbox(label="Estado del guardado", interactive=False)
+            
+            # === Y ESTO: Conectar el botón a la función ===
+            save_audio_btn.click(
+                fn=save_generated_audio,
+                inputs=audio_out,
+                outputs=save_output
+            )
 
     def on_select_prompt(name):
         return prompt_manager.get_prompt_text(name)
