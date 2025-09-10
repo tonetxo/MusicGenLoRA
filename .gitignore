@@ -10,3 +10,6 @@ __pycache__/
 *.pyd
 
 musicgen-dreamboothing/
+bak/
+lora/
+wandb/

@@ -687,26 +687,21 @@ def main():
     )
 
     # update pad token id and decoder_start_token_id
-    config.update(
-        {
-            "pad_token_id": model_args.pad_token_id
-            if model_args.pad_token_id is not None
-            else config.pad_token_id,
-            "decoder_start_token_id": model_args.decoder_start_token_id
-            if model_args.decoder_start_token_id is not None
-            else config.decoder_start_token_id,
-        }
-    )
-    config.decoder.update(
-        {
-            "pad_token_id": model_args.pad_token_id
-            if model_args.pad_token_id is not None
-            else config.decoder.pad_token_id,
-            "decoder_start_token_id": model_args.decoder_start_token_id
-            if model_args.decoder_start_token_id is not None
-            else config.decoder.decoder_start_token_id,
-        }
-    )
+    # =====================================================================================
+    # ========= INICIO DE LA CORRECCIÓN 2 =================================================
+    # =====================================================================================
+    # Forzamos el ID del token de inicio del decodificador y el de padding.
+    # El modelo MusicGen espera este valor en la configuración para la función `shift_tokens_right`.
+    # El valor por defecto y correcto para este modelo es 2048.
+    # Esto resuelve directamente el error 'ValueError: Make sure to set the decoder_start_token_id'.
+    token_id = 2048
+    config.decoder_start_token_id = token_id
+    config.pad_token_id = token_id
+    config.decoder.decoder_start_token_id = token_id
+    config.decoder.pad_token_id = token_id
+    # =====================================================================================
+    # ========= FIN DE LA CORRECCIÓN 2 ====================================================
+    # =====================================================================================
 
     # 4. Now we can instantiate the processor and model
     # Note for distributed training, the .from_pretrained methods guarantee that only
@@ -963,8 +958,8 @@ def main():
             target_modules.extend(["k", "v", "q", "o", "wi", "wo"])
 
         config = LoraConfig(
-            r=32,
-            lora_alpha=32,
+            r=16,
+            lora_alpha=16,
             target_modules=target_modules,
             lora_dropout=0.05,
             bias="none",
