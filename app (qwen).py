@@ -317,113 +317,39 @@ except Exception as e:
 # --------------------------------------------------------------------------- #
 # AYUDA PARA EXTRAER LA CAPTION --------------------------------------------- #
 # --------------------------------------------------------------------------- #
-def _extract_description(raw: Any, audio_path: str = None) -> dict:
+def _extract_description(raw: Any) -> str:
     """
-    Extrae información completa del tagger y audio para crear un caption rico.
+    Convierte la salida del tagger en una cadena que se usará como campo
+    `description` del caption completo.
+    Se buscan los mismos campos que antes (caption, label, …) y se devuelve
+    una cadena legible. Si no se encuentra nada devuelve un placeholder.
     """
-    result = {
-        "description": "audio caption placeholder",
-        "keywords": [],
-        "bpm": "",
-        "genre": "electronic",
-        "moods": [],
-        "instruments": ["Mix"],
-        "timbre": "",
-        "dynamics": "",
-        "structure": ""
-    }
-    
-    # Extraer descripción del tagger
-    description_text = ""
     if isinstance(raw, dict):
-        for key in ("caption", "text", "label", "labels", "tags", "predictions", "prediction", "description"):
+        for key in (
+            "caption",
+            "text",
+            "label",
+            "labels",
+            "tags",
+            "predictions",
+            "prediction",
+            "description",
+        ):
             if key in raw and raw[key]:
                 val = raw[key]
                 if isinstance(val, (list, tuple)):
-                    description_text = ", ".join([str(v).strip() for v in val if v])
-                else:
-                    description_text = str(val).strip()
-                break
-    elif isinstance(raw, (list, tuple)):
-        description_text = ", ".join([str(v).strip() for v in raw if v])
-    elif isinstance(raw, str):
-        description_text = raw.strip()
-    
-    result["description"] = description_text if description_text else "audio caption placeholder"
-    
-    # Si tenemos la ruta del archivo, podemos hacer análisis adicional
-    if audio_path and os.path.exists(audio_path):
-        try:
-            # Análisis con librosa
-            y, sr = librosa.load(audio_path, sr=None, mono=True)
-            duration = librosa.get_duration(y=y, sr=sr)
-            
-            # BPM - manejar correctamente los arrays de numpy
-            tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
-            # tempo puede ser un array, tomamos el primer valor o el promedio
-            if isinstance(tempo, np.ndarray):
-                tempo_val = float(tempo[0]) if len(tempo) > 0 else 0.0
-            else:
-                tempo_val = float(tempo) if tempo > 0 else 0.0
-            result["bpm"] = str(round(tempo_val)) if tempo_val > 0 else ""
-            
-            # Spectral features para timbre
-            spectral_centroids = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
-            avg_centroid = float(np.mean(spectral_centroids))
-            if avg_centroid < 2000:
-                timbre = "dark"
-            elif avg_centroid < 4000:
-                timbre = "warm"
-            else:
-                timbre = "bright"
-            result["timbre"] = timbre
-            
-            # RMS para dinámica
-            rms = librosa.feature.rms(y=y)[0]
-            avg_rms = float(np.mean(rms))
-            if avg_rms < 0.05:
-                dynamics = "soft"
-            elif avg_rms < 0.15:
-                dynamics = "medium"
-            else:
-                dynamics = "loud"
-            result["dynamics"] = dynamics
-            
-            # Estructura básica por duración
-            if duration < 30:
-                structure = "loop"
-            elif duration < 120:
-                structure = "intro"
-            else:
-                structure = "full track"
-            result["structure"] = structure
-            
-            # Keywords basadas en análisis
-            keywords = []
-            if tempo_val > 120:
-                keywords.append("energetic")
-            if "bright" in timbre:
-                keywords.append("crisp")
-            if "loud" in dynamics:
-                keywords.append("powerful")
-            if duration > 300:  # 5 minutos
-                keywords.append("epic")
-            result["keywords"] = keywords
-            
-            # Mood básico
-            if tempo_val > 100:
-                moods = ["uplifting", "energetic"]
-            elif tempo_val > 60:
-                moods = ["calm", "reflective"]
-            else:
-                moods = ["ambient", "meditative"]
-            result["moods"] = moods
-            
-        except Exception as e:
-            logger.warning(f"Error en análisis de audio {audio_path}: {e}")
-            logger.debug(f"Tipo de error: {type(e).__name__}")
-    
-    return result
+                    return ", ".join([str(v).strip() for v in val if v])
+                return str(val).strip()
+    if isinstance(raw, (list, tuple)):
+        return ", ".join([str(v).strip() for v in raw if v])
+    if isinstance(raw, str):
+        return raw.strip()
+    for attr in ("caption", "text"):
+        if hasattr(raw, attr):
+            val = getattr(raw, attr)
+            if val:
+                return str(val).strip()
+    return "audio caption placeholder"
 
 
 # --------------------------------------------------------------------------- #
@@ -431,10 +357,11 @@ def _extract_description(raw: Any, audio_path: str = None) -> dict:
 # --------------------------------------------------------------------------- #
 def generate_metadata(dataset_dir: str) -> str:
     """
-    Recorre `dataset_dir` y crea un `metadata.jsonl` con información completa.
+    Recorre `dataset_dir` y crea un `metadata.jsonl` con el **formato completo**
+    que indicas.
     """
     if not tagger_loaded:
-        return "❌ El modelo de audio-tagging no está disponible. Revisa los logs."
+        return "❌ El modelo de audio‑tagging no está disponible. Revisa los logs."
 
     root = Path(dataset_dir)
     if not root.is_dir():
@@ -446,9 +373,6 @@ def generate_metadata(dataset_dir: str) -> str:
         return f"⚠️ No se encontraron archivos de audio en {dataset_dir}"
 
     out_path = root / "metadata.jsonl"
-    success_count = 0
-    error_count = 0
-    
     with out_path.open("w", encoding="utf-8") as out_f:
         for audio_path in tqdm.tqdm(
             audio_files, desc="Generando metadata con captioning.py"
@@ -479,54 +403,21 @@ def generate_metadata(dataset_dir: str) -> str:
                 logger.warning(
                     f"Error del tagger en {audio_path.name}: {raw_res['error']}"
                 )
-                audio_info = _extract_description({}, str(audio_path))
-                error_count += 1
+                description = "audio caption placeholder"
             else:
-                audio_info = _extract_description(raw_res, str(audio_path))
-                success_count += 1
-
-            # Construir caption completo
-            description_parts = []
-            if audio_info["description"] and audio_info["description"] != "audio caption placeholder":
-                description_parts.append(audio_info["description"])
-            if audio_info["timbre"]:
-                description_parts.append(f"{audio_info['timbre']} timbre")
-            if audio_info["dynamics"]:
-                description_parts.append(f"{audio_info['dynamics']} dynamics")
-            if audio_info["structure"]:
-                description_parts.append(audio_info["structure"])
-            
-            full_description = ", ".join(description_parts) if description_parts else "audio caption placeholder"
+                description = _extract_description(raw_res)
 
             caption_dict = {
-                "key": "",
-                "artist": "Tonetxo",
-                "sample_rate": int(sr),
+                "key": "", "artist": "Voyager I", "sample_rate": int(sr),
                 "file_extension": audio_path.suffix.lstrip("."),
-                "description": full_description,
-                "keywords": ", ".join(audio_info["keywords"]) if audio_info["keywords"] else "",
-                "duration": round(float(duration), 2),
-                "bpm": audio_info["bpm"],
-                "genre": audio_info["genre"],
-                "title": audio_path.stem.replace("_", " ").title(),
-                "name": audio_path.stem,
-                "instrument": ", ".join(audio_info["instruments"]) if audio_info["instruments"] else "Mix",
-                "moods": audio_info["moods"],
-                "file_name": audio_path.name,
-                "audio_filepath": str(audio_path)
+                "description": description, "keywords": "", "duration": round(duration, 2),
+                "bpm": "", "genre": "electronic", "title": "Untitled song",
+                "name": audio_path.stem, "instrument": "Mix", "moods": [],
             }
-            
-            # Agregar campos adicionales si existen
-            if audio_info.get("timbre"):
-                caption_dict["timbre"] = audio_info["timbre"]
-            if audio_info.get("dynamics"):
-                caption_dict["dynamics"] = audio_info["dynamics"]
-            if audio_info.get("structure"):
-                caption_dict["structure"] = audio_info["structure"]
-
             out_f.write(json.dumps(caption_dict, ensure_ascii=False) + "\n")
 
-    return f"✅ metadata.jsonl creado en: {out_path} (Éxito: {success_count}, Errores: {error_count})"
+    return f"✅ metadata.jsonl creado en: {out_path}"
+
 
 # --------------------------------------------------------------------------- #
 # ENTRENAMIENTO (DreamBooth) ------------------------------------------------ #
@@ -581,43 +472,44 @@ def switch_model_and_state(lora_files: List[str]) -> Tuple[Dict[str, Any], str]:
     """
     Carga un LoRA a partir de una lista de archivos temporales de Gradio.
     """
-    global base_model
     logger.info(f"Cambiando modelo. Archivos LoRA recibidos: {lora_files}")
 
+    # Usar la variable global base_model
+    global base_model
+    
     # Liberar memoria primero
-    try:
-        if hasattr(base_model, 'to'):
-            base_model.to("cpu")
-        torch.cuda.empty_cache()
-    except Exception as e:
-        logger.warning(f"Advertencia al mover modelo a CPU: {e}")
+    if hasattr(base_model, 'to'):
+        base_model.to("cpu")
+    torch.cuda.empty_cache()
 
-    # Si no hay archivos LoRA, volver al modelo base
+    # Si la lista está vacía o es None, volvemos al modelo base ORIGINAL
     if not lora_files or all(f is None for f in lora_files):
         try:
-            logger.info("Limpiando y recreando modelo base...")
+            # RECREAR el modelo base desde cero para asegurar que no hay LoRA
+            logger.info("Recreando modelo base limpio...")
             
-            # Eliminar modelo actual
+            # Liberar memoria del modelo actual
             del base_model
             torch.cuda.empty_cache()
             
-            # Recrear modelo base limpio
+            # Recargar el modelo base completamente desde cero
             base_model = MusicgenForConditionalGeneration.from_pretrained(
                 MODEL_ID,
                 torch_dtype=torch.float16,
             )
             
-            # Reaplicar Flash Attention
+            # Reaplicar configuración de flash attention
             if hasattr(base_model.config, "use_flash_attention_2"):
                 base_model.config.use_flash_attention_2 = True
-            if hasattr(base_model, "text_encoder") and hasattr(base_model.text_encoder.config, "use_flash_attention_2"):
-                base_model.text_encoder.config.use_flash_attention_2 = False
-                
+            if hasattr(base_model, "text_encoder"):
+                if hasattr(base_model.text_encoder.config, "use_flash_attention_2"):
+                    base_model.text_encoder.config.use_flash_attention_2 = False
+            
             logger.info("✅ Modelo base recreado exitosamente")
             
         except Exception as e:
             logger.error(f"Error recreando modelo base: {e}")
-            # Fallback: cargar modelo base de nuevo
+            # Si falla, intentar cargar de nuevo el modelo
             base_model = MusicgenForConditionalGeneration.from_pretrained(
                 MODEL_ID,
                 torch_dtype=torch.float16,
@@ -628,34 +520,27 @@ def switch_model_and_state(lora_files: List[str]) -> Tuple[Dict[str, Any], str]:
         new_state = {"model": base_model, "lora_path": None}
         
     else:
-        # Cargar LoRA
         try:
+            # Crear un directorio temporal único para los archivos LoRA
             import tempfile
             import shutil
             
-            # Crear directorio temporal
             lora_temp_dir = tempfile.mkdtemp()
-            logger.info(f"Directorio temporal para LoRA: {lora_temp_dir}")
+            logger.info(f"Creando directorio temporal para LoRA: {lora_temp_dir}")
             
-            # Copiar archivos
+            # Copiar todos los archivos al directorio temporal
             for file_path in lora_files:
                 if file_path and file_path != "None":
                     filename = os.path.basename(file_path)
                     dest_path = os.path.join(lora_temp_dir, filename)
                     shutil.copy2(file_path, dest_path)
-                    logger.info(f"Copiado: {filename}")
+                    logger.info(f"Copiado {filename} a {lora_temp_dir}")
             
-            # Verificar archivos requeridos
-            required_files = {"adapter_config.json", "adapter_model.safetensors"}
-            files_in_dir = set(os.listdir(lora_temp_dir))
-            
-            if not required_files.issubset(files_in_dir):
-                missing = required_files - files_in_dir
-                raise ValueError(f"Faltan archivos LoRA: {missing}")
-            
+            # Verificar que tenemos los archivos necesarios
+            files_in_dir = os.listdir(lora_temp_dir)
             logger.info(f"Archivos en directorio temporal: {files_in_dir}")
             
-            # Limpiar modelo base si tiene LoRA cargado
+            # Asegurarse de que el modelo base esté limpio primero
             if hasattr(base_model, 'peft_config'):
                 logger.info("Limpiando modelo base antes de cargar LoRA...")
                 del base_model
@@ -665,47 +550,35 @@ def switch_model_and_state(lora_files: List[str]) -> Tuple[Dict[str, Any], str]:
                     torch_dtype=torch.float16,
                 )
             
-            # Cargar LoRA
+            # Cargar el LoRA desde el directorio temporal
             active_model = PeftModel.from_pretrained(base_model, lora_temp_dir)
-            logger.info("✅ LoRA cargado exitosamente")
-            
-            # Aplicar Flash Attention al modelo LoRA
+
             if hasattr(active_model.config, "use_flash_attention_2"):
                 active_model.config.use_flash_attention_2 = True
-            if hasattr(active_model, "text_encoder") and hasattr(active_model.text_encoder.config, "use_flash_attention_2"):
-                active_model.text_encoder.config.use_flash_attention_2 = False
-            
-            status = "✅ LoRA activo"
+            if hasattr(active_model, "text_encoder"):
+                if hasattr(active_model.text_encoder.config, "use_flash_attention_2"):
+                    active_model.text_encoder.config.use_flash_attention_2 = False
+
+            status = f"✅ LoRA activo"
             new_state = {"model": active_model, "lora_path": lora_temp_dir}
             
         except Exception as e:
             logger.error(f"Error cargando LoRA: {e}")
-            
-            # Limpiar directorio temporal
+            # Limpiar el directorio temporal en caso de error
             if 'lora_temp_dir' in locals():
                 shutil.rmtree(lora_temp_dir, ignore_errors=True)
             
-            # Fallback a modelo base
-            try:
-                base_model = MusicgenForConditionalGeneration.from_pretrained(
-                    MODEL_ID,
-                    torch_dtype=torch.float16,
-                )
-            except Exception as fallback_error:
-                logger.error(f"Error en fallback a modelo base: {fallback_error}")
-                raise fallback_error
-                
+            # Asegurarse de tener un modelo base limpio
+            base_model = MusicgenForConditionalGeneration.from_pretrained(
+                MODEL_ID,
+                torch_dtype=torch.float16,
+            )
             active_model = base_model
-            status = f"❌ Error al cargar LoRA: {str(e)[:100]}..."
+            status = f"❌ Error al cargar LoRA: {e}"
             new_state = {"model": base_model, "lora_path": None}
     
-    # Mover modelo a CPU y limpiar cache
-    try:
-        active_model.to("cpu")
-        torch.cuda.empty_cache()
-    except Exception as e:
-        logger.warning(f"Advertencia al mover modelo a CPU después de carga: {e}")
-    
+    active_model.to("cpu")
+    torch.cuda.empty_cache()
     logger.info(status)
     return new_state, status
 
