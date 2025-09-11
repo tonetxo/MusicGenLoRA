@@ -13,3 +13,5 @@ musicgen-dreamboothing/
 bak/
 lora/
 wandb/
+augmented_training_data/
+generated_audio/

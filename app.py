@@ -529,6 +529,159 @@ def generate_metadata(dataset_dir: str) -> str:
 
     return f"✅ metadata.jsonl creado en: {out_path} (Éxito: {success_count}, Errores: {error_count})"
 
+# === NUEVA FUNCIÓN: Augmentar Dataset ===
+# === CORREGIDO: Augmentar Dataset ===
+def augment_dataset_simple(input_dataset_path: str, output_dataset_path: str) -> str:
+    """
+    Augmenta un dataset de audio aplicando transformaciones simples.
+    """
+    logger.info(f"Iniciando augmentación de dataset: {input_dataset_path} -> {output_dataset_path}")
+    
+    input_path = Path(input_dataset_path)
+    output_path = Path(output_dataset_path)
+    augmented_audio_dir = output_path / "augmented_audio"
+    
+    # Validar directorio de entrada
+    if not input_path.is_dir():
+        return f"❌ Directorio de entrada inválido: {input_dataset_path}"
+
+    metadata_file = input_path / "metadata.jsonl"
+    if not metadata_file.exists():
+        return f"❌ No se encontró 'metadata.jsonl' en {input_dataset_path}"
+
+    # Crear directorios de salida
+    try:
+        output_path.mkdir(parents=True, exist_ok=True)
+        augmented_audio_dir.mkdir(exist_ok=True)
+    except Exception as e:
+        return f"❌ Error creando directorio de salida: {e}"
+
+    def simple_augment_audio(y, sr, filename_prefix):
+        """Aplica augmentaciones simples al audio."""
+        augmented_samples = []
+        
+        # Pitch Shift
+        try:
+            y_pitch_down = librosa.effects.pitch_shift(y, sr=sr, n_steps=-1)
+            augmented_samples.append((y_pitch_down, sr, f"{filename_prefix}_pitch_down1"))
+        except Exception:
+            pass # Omitir si falla
+            
+        try:
+            y_pitch_up = librosa.effects.pitch_shift(y, sr=sr, n_steps=1)
+            augmented_samples.append((y_pitch_up, sr, f"{filename_prefix}_pitch_up1"))
+        except Exception:
+            pass
+            
+        # Time Stretch
+        try:
+            y_stretch_slow = librosa.effects.time_stretch(y, rate=0.98)
+            augmented_samples.append((y_stretch_slow, sr, f"{filename_prefix}_stretch_slow"))
+        except Exception:
+            pass
+            
+        try:
+            y_stretch_fast = librosa.effects.time_stretch(y, rate=1.02)
+            augmented_samples.append((y_stretch_fast, sr, f"{filename_prefix}_stretch_fast"))
+        except Exception:
+            pass
+            
+        # Volumen
+        y_vol_down = np.clip(y * 0.9, -1.0, 1.0)
+        augmented_samples.append((y_vol_down, sr, f"{filename_prefix}_vol_down"))
+        
+        y_vol_up = np.clip(y * 1.1, -1.0, 1.0)
+        augmented_samples.append((y_vol_up, sr, f"{filename_prefix}_vol_up"))
+        
+        return augmented_samples
+
+    total_samples = 0
+    new_metadata_path = output_path / "metadata.jsonl"
+    
+    try:
+        with open(metadata_file, 'r', encoding='utf-8') as f_in, \
+             open(new_metadata_path, 'w', encoding='utf-8') as f_out:
+            
+            # Leer todas las líneas originales
+            original_lines = [line.strip() for line in f_in if line.strip()]
+            
+            # 1. Copiar muestras originales PERO con rutas actualizadas
+            logger.info(f"Procesando {len(original_lines)} muestras originales...")
+            for line in original_lines:
+                try:
+                    data = json.loads(line)
+                    # Actualizar la ruta del archivo de audio a la nueva ubicación
+                    original_filename = data['file_name']
+                    new_audio_path = str(augmented_audio_dir / original_filename)
+                    data['audio_filepath'] = new_audio_path
+                    
+                    f_out.write(json.dumps(data, ensure_ascii=False) + '\n')
+                    total_samples += 1
+                    
+                    # COPIAR el archivo original al directorio augmentado
+                    original_audio_path = Path(data['audio_filepath'])
+                    if original_audio_path.exists():
+                        import shutil
+                        shutil.copy2(original_audio_path, new_audio_path)
+                        
+                except Exception as e:
+                    logger.error(f"Error procesando muestra original: {e}")
+                    continue
+            
+            logger.info(f"Copiadas {len(original_lines)} muestras originales")
+            
+            # 2. Augmentar cada muestra original
+            for i, line in enumerate(tqdm.tqdm(original_lines, desc="Augmentando")):
+                try:
+                    data = json.loads(line)
+                    original_audio_path = Path(data['audio_filepath'])
+                    
+                    # Verificar que el archivo existe
+                    if not original_audio_path.exists():
+                        logger.warning(f"Archivo no encontrado, saltando: {original_audio_path}")
+                        continue
+                        
+                    # Cargar audio
+                    y, sr = librosa.load(str(original_audio_path), sr=None, mono=True)
+                    
+                    # Generar augmentaciones
+                    filename_prefix = original_audio_path.stem
+                    augmented_samples = simple_augment_audio(y, sr, filename_prefix)
+                    
+                    # Guardar cada augmentación
+                    for aug_y, aug_sr, aug_name in augmented_samples:
+                        try:
+                            # Guardar audio augmentado
+                            new_audio_filename = f"{aug_name}.wav"
+                            new_audio_path = str(augmented_audio_dir / new_audio_filename)
+                            sf.write(new_audio_path, aug_y, aug_sr)
+                            
+                            # Crear nueva entrada en metadata con ruta CORRECTA
+                            new_data = data.copy()
+                            new_data['name'] = aug_name
+                            new_data['title'] = f"{data['title']} ({aug_name.split('_')[-1]})"
+                            new_data['file_name'] = new_audio_filename
+                            new_data['audio_filepath'] = new_audio_path  # RUTA CORRECTA
+                            new_data['description'] = f"{data['description']} (augmented)"
+                            
+                            f_out.write(json.dumps(new_data, ensure_ascii=False) + '\n')
+                            total_samples += 1
+                            
+                        except Exception as e:
+                            logger.error(f"Error guardando augmentación {aug_name}: {e}")
+                            continue
+                            
+                except Exception as e:
+                    logger.error(f"Error procesando muestra {i}: {e}")
+                    continue
+    
+        logger.info(f"✅ Dataset augmentado: {total_samples} muestras totales")
+        return f"✅ Dataset augmentado: {total_samples} muestras generadas en {output_path}"
+        
+    except Exception as e:
+        logger.error(f"Error en augmentación: {e}")
+        return f"❌ Error en augmentación: {str(e)}"
+
 # === NUEVA FUNCIÓN: Guardar audio generado ===
 def save_generated_audio(audio_data: Tuple[int, Any], output_dir: str = "./generated_audio") -> str:
     """
@@ -582,9 +735,21 @@ def save_generated_audio(audio_data: Tuple[int, Any], output_dir: str = "./gener
 # --------------------------------------------------------------------------- #
 # ENTRENAMIENTO (DreamBooth) ------------------------------------------------ #
 # --------------------------------------------------------------------------- #
+# === CORREGIDO: ENTRENAMIENTO (DreamBooth) ===
+import time # Asegúrate de que 'time' esté importado
+
 def modify_and_run_training(
-    dataset_path, output_dir, epochs, lr, lora_r, lora_alpha, max_duration, train_seed
+    dataset_path, output_dir, epochs, lr, lora_r, lora_alpha, max_duration, train_seed,
+    use_augmented=False, augmented_path=""
 ) -> Generator[str, None, None]:
+    """
+    Modifica y ejecuta el script de entrenamiento, mostrando logs acumulados en tiempo real.
+    """
+    # Si se debe usar el dataset augmentado:
+    if use_augmented and augmented_path and os.path.exists(augmented_path):
+        absolute_dataset_path = os.path.abspath(dataset_path)
+        logger.info(f"Usando ruta de dataset absoluta: {absolute_dataset_path}")
+
     script_path = "./musicgen-dreamboothing/dreambooth_musicgen.py"
     try:
         with open(script_path, "r", encoding="utf-8") as f:
@@ -596,12 +761,12 @@ def modify_and_run_training(
             f.write(script_content)
         yield f"✅ Script modificado: r={int(lora_r)}, lora_alpha={int(lora_alpha)}\n"
     except Exception as e:
-        yield f"❌ Error al modificar script: {e}"
+        yield f"❌ Error al modificar script: {e}\n"
         return
 
     command = [
         "accelerate", "launch", "dreambooth_musicgen.py",
-        f"--model_name_or_path={MODEL_ID}", f"--dataset_name={dataset_path}",
+        f"--model_name_or_path={MODEL_ID}", f"--dataset_name={absolute_dataset_path}",
         f"--output_dir={output_dir}", f"--num_train_epochs={int(epochs)}",
         "--use_lora", f"--learning_rate={lr}", "--per_device_train_batch_size=1",
         "--gradient_accumulation_steps=4", "--fp16", "--text_column_name=description",
@@ -609,20 +774,58 @@ def modify_and_run_training(
         "--overwrite_output_dir", "--do_train", "--decoder_start_token_id=2048",
         f"--max_duration_in_seconds={int(max_duration)}", "--gradient_checkpointing",
         f"--seed={int(train_seed)}",
+        "--logging_steps=1",
+        "--logging_strategy=steps", 
+        "--logging_first_step=True",
     ]
 
-    yield "🚀 Lanzando entrenamiento...\n\n"
+    # Inicializar el acumulador de logs
+    full_log = "🚀 Lanzando entrenamiento...\n\n"
+    yield full_log
+
     process = subprocess.Popen(
-        command, cwd="./musicgen-dreamboothing", stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+        command,
+        cwd="./musicgen-dreamboothing",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        bufsize=1,
+        universal_newlines=True
     )
-    for line in iter(process.stdout.readline, ""):
-        yield line
-    process.wait()
+
+    # Leer la salida línea por línea en tiempo real
+    try:
+        for line in iter(process.stdout.readline, ''):
+            if line:  # Solo procesar líneas no vacías
+                # Limpiar la línea de retornos de carro al final
+                clean_line = line.rstrip('\n\r')
+                if clean_line: # Solo añadir si después de limpiar no está vacía
+                    # Añadir la nueva línea al log acumulado
+                    full_log += clean_line + "\n"
+                    # Yield el log acumulado completo para actualizar la UI
+                    yield full_log
+        # El iterador termina cuando el proceso cierra stdout
+    except Exception as e:
+        error_line = f"[ERROR - Excepción al leer stdout] {e}\n"
+        full_log += error_line
+        yield full_log
+    finally:
+        # Esperar a que el proceso termine
+        process.wait()
+
+    # Añadir el resultado final
     if process.returncode == 0:
-        yield "\n✅ ¡Entrenamiento finalizado!"
+        final_msg = "\n✅ ¡Entrenamiento finalizado exitosamente!"
     else:
-        yield f"\n❌ Proceso terminó con código {process.returncode}"
+        final_msg = f"\n❌ Proceso terminó con código de error: {process.returncode}"
+
+    full_log += final_msg
+    yield full_log
+
+
+
+
 
 
 # --------------------------------------------------------------------------- #
@@ -904,9 +1107,24 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                 generate_metadata_button = gr.Button(
                     "🤖 Generar `metadata.jsonl` (con captioning.py)"
                 )
+                # === AÑADIR ESTO PARA AUGMENTACIÓN ===
+                augment_dataset_btn = gr.Button(
+                    "🔄 Augmentar Dataset"
+                )
+                # === HASTA AQUÍ ===
                 metadata_output = gr.Textbox(
                     label="Resultado", lines=2, interactive=False
                 )
+            # === AÑADIR ESTE BLOQUE PARA LOS NUEVOS CONTROLES ===
+            with gr.Row():
+                augmented_output_path = gr.Textbox(
+                    label="📂 Ruta de salida para dataset augmentado",
+                    value="./augmented_training_data",
+                )
+                use_augmented_cb = gr.Checkbox(
+                    label="Usar dataset augmentado para entrenamiento",
+                    value=False
+                )    
             with gr.Row():
                 output_dir_input = gr.Textbox(
                     label="📁 Carpeta de salida (LoRA)",
@@ -916,7 +1134,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                     label="Épocas", minimum=1, maximum=100, step=1, value=settings.get("epochs", 15)
                 )
                 lr_input = gr.Number(
-    		    label="Learning Rate",
+                label="Learning Rate",
                     value=settings.get("lr", 0.0001),
                     precision=6
                 )
@@ -1033,7 +1251,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
     enhance_btn.click(fn=ollama.enhance_and_translate_prompt, inputs=[ollama_model_dd, prompt_text_area, use_captions_cb, prep_dataset_path_input], outputs=prompt_text_area)
     use_in_inference_btn.click(fn=lambda txt: (txt, gr.Tabs(selected=2)), inputs=prompt_text_area, outputs=[prompt_input, tabs])
     generate_metadata_button.click(fn=generate_metadata, inputs=prep_dataset_path_input, outputs=metadata_output)
-    launch_train_btn.click(fn=modify_and_run_training, inputs=[prep_dataset_path_input, output_dir_input, epochs_input, lr_input, r_input, alpha_input, max_duration_input, train_seed_input], outputs=train_log)
+    launch_train_btn.click(fn=modify_and_run_training, inputs=[prep_dataset_path_input, output_dir_input, epochs_input, lr_input, r_input, alpha_input, max_duration_input, train_seed_input, use_augmented_cb, augmented_output_path], outputs=train_log)
 
     lora_path_input.change(fn=switch_model_and_state, inputs=lora_path_input, outputs=[active_model_state, status_output])
 
@@ -1043,6 +1261,11 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             inference_seed_input, guidance_slider, temperature_slider, topk_slider, topp_slider,
         ],
         outputs=[active_model_state, status_output, audio_out]
+    )
+    augment_dataset_btn.click(
+        fn=augment_dataset_simple,
+        inputs=[prep_dataset_path_input, augmented_output_path],
+        outputs=metadata_output
     )
 
     def _persist(key: str, val: Any) -> None:

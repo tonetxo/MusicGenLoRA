@@ -958,8 +958,8 @@ def main():
             target_modules.extend(["k", "v", "q", "o", "wi", "wo"])
 
         config = LoraConfig(
-            r=16,
-            lora_alpha=16,
+            r=24,
+            lora_alpha=32,
             target_modules=target_modules,
             lora_dropout=0.05,
             bias="none",
