@@ -610,19 +610,39 @@ def augment_dataset_simple(input_dataset_path: str, output_dataset_path: str) ->
             for line in original_lines:
                 try:
                     data = json.loads(line)
-                    # Actualizar la ruta del archivo de audio a la nueva ubicación
+                                                            # --- INICIO DEL BLOQUE CORREGIDO PARA MUESTRAS ORIGINALES ---
+                    # 1. Definir la ruta absoluta del archivo original
+                    original_audio_path_str = data['audio_filepath']
+                    original_audio_path = Path(original_audio_path_str)
+                    
+                    # Si la ruta en el JSON original es relativa, convertirla a absoluta
+                    # basándonos en el directorio del dataset original
+                    if not original_audio_path.is_absolute():
+                        original_audio_path = input_path / original_audio_path
+                        
+                    if not original_audio_path.exists():
+                        logger.warning(f"Archivo original no encontrado, saltando: {original_audio_path}")
+                        continue
+                        
+                    # 2. Definir la ruta donde se copiará el archivo (y su ruta absoluta)
                     original_filename = data['file_name']
-                    new_audio_path = str(augmented_audio_dir / original_filename)
-                    data['audio_filepath'] = new_audio_path
+                    new_audio_path_obj = augmented_audio_dir / original_filename
+                    new_audio_path_absolute_str = str(new_audio_path_obj.resolve()) # <-- .resolve() para ruta absoluta canónica
                     
-                    f_out.write(json.dumps(data, ensure_ascii=False) + '\n')
+                    # 3. Copiar el archivo
+                    import shutil
+                    shutil.copy2(original_audio_path, new_audio_path_obj) # <-- Copiar a la ruta Path
+                    logger.debug(f"Copiado: {original_audio_path} -> {new_audio_path_obj}")
+                    
+                    # 4. Crear una nueva entrada para el metadata.jsonl copiado
+                    new_data_entry = data.copy()
+                    # *** LÍNEA CRÍTICA CORREGIDA ***
+                    new_data_entry['audio_filepath'] = new_audio_path_absolute_str # <-- RUTA ABSOLUTA
+                    
+                    # 5. Escribir la entrada actualizada en el nuevo metadata.jsonl
+                    f_out.write(json.dumps(new_data_entry, ensure_ascii=False) + '\n')
                     total_samples += 1
-                    
-                    # COPIAR el archivo original al directorio augmentado
-                    original_audio_path = Path(data['audio_filepath'])
-                    if original_audio_path.exists():
-                        import shutil
-                        shutil.copy2(original_audio_path, new_audio_path)
+                    # --- FIN DEL BLOQUE CORREGIDO PARA MUESTRAS ORIGINALES ---
                         
                 except Exception as e:
                     logger.error(f"Error procesando muestra original: {e}")
@@ -651,21 +671,30 @@ def augment_dataset_simple(input_dataset_path: str, output_dataset_path: str) ->
                     # Guardar cada augmentación
                     for aug_y, aug_sr, aug_name in augmented_samples:
                         try:
-                            # Guardar audio augmentado
+                                                        # --- INICIO DEL BLOQUE CORREGIDO PARA MUESTRAS AUGMENTADAS ---
+                            # 1. Generar el nombre de archivo y la ruta Path
                             new_audio_filename = f"{aug_name}.wav"
-                            new_audio_path = str(augmented_audio_dir / new_audio_filename)
-                            sf.write(new_audio_path, aug_y, aug_sr)
+                            new_audio_path_obj = augmented_audio_dir / new_audio_filename
+                            new_audio_path_absolute_str = str(new_audio_path_obj.resolve()) # <-- .resolve() para ruta absoluta canónica
                             
-                            # Crear nueva entrada en metadata con ruta CORRECTA
+                            # 2. Guardar el audio augmentado
+                            sf.write(new_audio_path_absolute_str, aug_y, aug_sr) # <-- Usar la ruta absoluta para guardar
+                            logger.debug(f"Guardado augmentado: {new_audio_path_absolute_str}")
+                            
+                            # 3. Crear nueva entrada en metadata con RUTA ABSOLUTA
                             new_data = data.copy()
                             new_data['name'] = aug_name
                             new_data['title'] = f"{data['title']} ({aug_name.split('_')[-1]})"
                             new_data['file_name'] = new_audio_filename
-                            new_data['audio_filepath'] = new_audio_path  # RUTA CORRECTA
+                            # *** LÍNEA CRÍTICA CORREGIDA ***
+                            new_data['audio_filepath'] = new_audio_path_absolute_str # <-- Usar la ruta absoluta
+                            
                             new_data['description'] = f"{data['description']} (augmented)"
                             
+                            # 4. Escribir la entrada en el nuevo metadata.jsonl
                             f_out.write(json.dumps(new_data, ensure_ascii=False) + '\n')
                             total_samples += 1
+                            # --- FIN DEL BLOQUE CORREGIDO PARA MUESTRAS AUGMENTADAS ---                            
                             
                         except Exception as e:
                             logger.error(f"Error guardando augmentación {aug_name}: {e}")
@@ -746,10 +775,20 @@ def modify_and_run_training(
     Modifica y ejecuta el script de entrenamiento, mostrando logs acumulados en tiempo real.
     """
     # Si se debe usar el dataset augmentado:
+        # === CORREGIDO: Determinar y definir siempre absolute_dataset_path ===
+    # Elegir la ruta del dataset a usar
     if use_augmented and augmented_path and os.path.exists(augmented_path):
-        absolute_dataset_path = os.path.abspath(dataset_path)
-        logger.info(f"Usando ruta de dataset absoluta: {absolute_dataset_path}")
+        dataset_path_to_use = augmented_path
+        logger.info(f"Usando dataset augmentado: {dataset_path_to_use}")
+    else:
+        dataset_path_to_use = dataset_path
+        # Opcional: logger.info(f"Usando dataset original: {dataset_path_to_use}")
 
+    # Convertir la ruta elegida a una ruta absoluta
+    # Esta línea SIEMPRE se ejecuta, definiendo absolute_dataset_path
+    absolute_dataset_path = os.path.abspath(dataset_path_to_use)
+    logger.info(f"Usando ruta de dataset absoluta: {absolute_dataset_path}")
+    # === FIN DE LA CORRECCIÓN ===
     script_path = "./musicgen-dreamboothing/dreambooth_musicgen.py"
     try:
         with open(script_path, "r", encoding="utf-8") as f:
@@ -777,6 +816,7 @@ def modify_and_run_training(
         "--logging_steps=1",
         "--logging_strategy=steps", 
         "--logging_first_step=True",
+        "--save_strategy=epoch",
     ]
 
     # Inicializar el acumulador de logs
@@ -1131,7 +1171,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                     value=settings.get("output_dir", ""),
                 )
                 epochs_input = gr.Slider(
-                    label="Épocas", minimum=1, maximum=100, step=1, value=settings.get("epochs", 15)
+                    label="Épocas", minimum=1, maximum=500, step=1, value=settings.get("epochs", 15)
                 )
                 lr_input = gr.Number(
                 label="Learning Rate",
