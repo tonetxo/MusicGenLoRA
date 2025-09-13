@@ -1,18 +1,18 @@
 {
     "dataset_path": "/mnt/datos/ModeloAudio/training_data",
-    "output_dir": "./lora/R32A32S180E50",
-    "epochs": 5,
-    "lr": 1e-05,
+    "output_dir": "./lora/324A64S180E10",
+    "epochs": 10,
+    "lr": 0.0001,
     "lora_r": 32,
-    "lora_alpha": 32,
+    "lora_alpha": 64,
     "max_duration": 180,
     "ollama_model": "gemma3:latest",
     "train_seed": 1,
     "inference_prompt": "Create an ambient, medium tempo deep house music track with a warm, woody timbre. Featuring piano, synthesizer, marimba, glockenspiel, and xylophone instruments, the piece should have a strong beat that evolves throughout the loop. Add elements of train sounds like a distant railroad background to create a unique ambiance. The overall mood is sad yet uplifting with soft, dynamic changes in volume and intensity.",
     "inference_duration": 15,
     "lora_path": [
-        "/tmp/gradio/37e4c129fe938ff9c6f3d4deef78b92c394297c81356d3267e3b66df7f244868/adapter_config.json",
-        "/tmp/gradio/298e085159f1843457ec9df2eec764f6032e667960b9b0317e77a3e1b1b442dd/adapter_model.safetensors"
+        "/tmp/gradio/f755020bc2bd95726dd0e4a2498fe439b74a04ef3b8ed90020071a25e8688151/adapter_config.json",
+        "/tmp/gradio/49b30e19ab3e2bbaf440aa44b8d63defc9d15681d51656b31727de213356b4b1/adapter_model.safetensors"
     ],
     "inference_seed": 1,
     "guidance_scale": 4,

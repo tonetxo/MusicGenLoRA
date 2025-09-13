@@ -1,0 +1,94 @@
+def modify_and_run_training(
+    dataset_path, output_dir, epochs, lr, lora_r, lora_alpha, max_duration, train_seed,
+    use_augmented=False, augmented_path=""
+) -> Generator[str, None, None]:
+    """
+    Modifica y ejecuta el script de entrenamiento, mostrando logs acumulados en tiempo real.
+    """
+    # Si se debe usar el dataset augmentado:
+        # === CORREGIDO: Determinar y definir siempre absolute_dataset_path ===
+    # Elegir la ruta del dataset a usar
+    if use_augmented and augmented_path and os.path.exists(augmented_path):
+        dataset_path_to_use = augmented_path
+        logger.info(f"Usando dataset augmentado: {dataset_path_to_use}")
+    else:
+        dataset_path_to_use = dataset_path
+        # Opcional: logger.info(f"Usando dataset original: {dataset_path_to_use}")
+
+    # Convertir la ruta elegida a una ruta absoluta
+    # Esta línea SIEMPRE se ejecuta, definiendo absolute_dataset_path
+    absolute_dataset_path = os.path.abspath(dataset_path_to_use)
+    logger.info(f"Usando ruta de dataset absoluta: {absolute_dataset_path}")
+    # === FIN DE LA CORRECCIÓN ===
+    script_path = "./musicgen-dreamboothing/dreambooth_musicgen.py"
+    try:
+        with open(script_path, "r", encoding="utf-8") as f:
+            script_content = f.read()
+        script_content = re.sub(r"r=\d+", f"r={int(lora_r)}", script_content)
+        script_content = re.sub(r"lora_alpha=\d+", f"lora_alpha={int(lora_alpha)}", script_content)
+        script_content = re.sub(r"--text_column_name=\w+", "--text_column_name=description", script_content)
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write(script_content)
+        yield f"✅ Script modificado: r={int(lora_r)}, lora_alpha={int(lora_alpha)}\n"
+    except Exception as e:
+        yield f"❌ Error al modificar script: {e}\n"
+        return
+
+    command = [
+        "accelerate", "launch", "dreambooth_musicgen.py",
+        f"--model_name_or_path={MODEL_ID}", f"--dataset_name={absolute_dataset_path}",
+        f"--output_dir={output_dir}", f"--num_train_epochs={int(epochs)}",
+        "--use_lora", f"--learning_rate={lr}", "--per_device_train_batch_size=1",
+        "--gradient_accumulation_steps=4", "--fp16", "--text_column_name=description",
+        "--target_audio_column_name=audio_filepath", "--train_split_name=train",
+        "--overwrite_output_dir", "--do_train", "--decoder_start_token_id=2048",
+        f"--max_duration_in_seconds={int(max_duration)}", "--gradient_checkpointing",
+        f"--seed={int(train_seed)}",
+        "--logging_steps=1",
+        "--logging_strategy=steps", 
+        "--logging_first_step=True",
+    ]
+
+    # Inicializar el acumulador de logs
+    full_log = "🚀 Lanzando entrenamiento...\n\n"
+    yield full_log
+
+    process = subprocess.Popen(
+        command,
+        cwd="./musicgen-dreamboothing",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        bufsize=1,
+        universal_newlines=True
+    )
+
+    # Leer la salida línea por línea en tiempo real
+    try:
+        for line in iter(process.stdout.readline, ''):
+            if line:  # Solo procesar líneas no vacías
+                # Limpiar la línea de retornos de carro al final
+                clean_line = line.rstrip('\n\r')
+                if clean_line: # Solo añadir si después de limpiar no está vacía
+                    # Añadir la nueva línea al log acumulado
+                    full_log += clean_line + "\n"
+                    # Yield el log acumulado completo para actualizar la UI
+                    yield full_log
+        # El iterador termina cuando el proceso cierra stdout
+    except Exception as e:
+        error_line = f"[ERROR - Excepción al leer stdout] {e}\n"
+        full_log += error_line
+        yield full_log
+    finally:
+        # Esperar a que el proceso termine
+        process.wait()
+
+    # Añadir el resultado final
+    if process.returncode == 0:
+        final_msg = "\n✅ ¡Entrenamiento finalizado exitosamente!"
+    else:
+        final_msg = f"\n❌ Proceso terminó con código de error: {process.returncode}"
+
+    full_log += final_msg
+    yield full_log

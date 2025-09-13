@@ -10,7 +10,7 @@ __pycache__/
 *.pyd
 
 musicgen-dreamboothing/
-bak/
+
 lora/
 wandb/
 augmented_training_data/

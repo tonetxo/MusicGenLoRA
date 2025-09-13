@@ -37,10 +37,11 @@ import os
 import re
 import subprocess
 import sys
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Tuple, Optional
-import numpy as np
+
 import gradio as gr
 import librosa
 import requests
@@ -48,7 +49,6 @@ import torch
 import tqdm
 from transformers import AutoProcessor, MusicgenForConditionalGeneration
 from peft import PeftModel
-import soundfile as sf
 
 # --------------------------------------------------------------------------- #
 # IMPORT DE AUDIO‑TAGGER ------------------------------------------------------ #
@@ -292,6 +292,76 @@ class OllamaIntegration:
             logger.error(f"Error en Ollama: {e}")
             return "Error al conectar con Ollama."
 
+    def enhance_captions_for_musicgen(self, model_name: str, metadata_path: str) -> str:
+        """
+        Mejora las captions del metadata.jsonl usando Ollama específicamente para MusicGen.
+        """
+        if not metadata_path or not os.path.exists(metadata_path):
+            return "❌ El archivo metadata.jsonl no existe o la ruta es inválida."
+        
+        try:
+            # Leer el metadata.jsonl existente
+            enhanced_entries = []
+            improved_count = 0
+            total_count = 0
+            
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+                total_count = len(lines)
+                
+                for line in tqdm.tqdm(lines, desc="Mejorando captions con Ollama"):
+                    entry = json.loads(line.strip())
+                    original_description = entry.get("description", "")
+                    
+                    if original_description and original_description != "audio caption placeholder":
+                        # Prompt específico para mejorar captions para MusicGen
+                        ollama_prompt = (
+                            f"Eres un experto en descripción de audio para generación musical. "
+                            f"Mejora esta descripción para que sea más efectiva con MusicGen: "
+                            f"\"{original_description}\". "
+                            f"La descripción debe ser concisa, en inglés, y enfocada en características "
+                            f"musicales como género, instrumentos, tempo, ambiente, etc. "
+                            f"Mantén la esencia original pero hazla más descriptiva para IA."
+                        )
+                        
+                        payload = {"model": model_name, "prompt": ollama_prompt, "stream": False}
+                        
+                        try:
+                            r = self.session.post(
+                                f"{self.base_url}/api/generate", json=payload, timeout=30
+                            )
+                            r.raise_for_status()
+                            data = r.json()
+                            enhanced_description = data.get("response", "").strip().replace('"', "")
+                            
+                            if enhanced_description and "Error" not in enhanced_description:
+                                entry["description"] = enhanced_description
+                                improved_count += 1
+                                logger.info(f"Caption mejorada: {original_description} -> {enhanced_description}")
+                            else:
+                                logger.warning(f"No se pudo mejorar la caption: {original_description}")
+                                
+                        except Exception as e:
+                            logger.error(f"Error con Ollama para caption: {original_description}: {e}")
+                            # Mantener la descripción original si hay error
+                    
+                    enhanced_entries.append(entry)
+            
+            # Guardar el metadata.jsonl mejorado
+            backup_path = metadata_path + ".backup"
+            shutil.copy2(metadata_path, backup_path)
+            logger.info(f"Backup creado en: {backup_path}")
+            
+            with open(metadata_path, "w", encoding="utf-8") as f:
+                for entry in enhanced_entries:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            
+            return f"✅ {improved_count}/{total_count} captions mejoradas. Backup en: {backup_path}"
+            
+        except Exception as e:
+            logger.error(f"Error mejorando captions: {e}")
+            return f"❌ Error mejorando captions: {e}"
+
 
 # --------------------------------------------------------------------------- #
 # INSTANCIACIÓN GLOBAL ------------------------------------------------------ #
@@ -318,113 +388,39 @@ except Exception as e:
 # --------------------------------------------------------------------------- #
 # AYUDA PARA EXTRAER LA CAPTION --------------------------------------------- #
 # --------------------------------------------------------------------------- #
-def _extract_description(raw: Any, audio_path: str = None) -> dict:
+def _extract_description(raw: Any) -> str:
     """
-    Extrae información completa del tagger y audio para crear un caption rico.
+    Convierte la salida del tagger en una cadena que se usará como campo
+    `description` del caption completo.
+    Se buscan los mismos campos que antes (caption, label, …) y se devuelve
+    una cadena legible. Si no se encuentra nada devuelve un placeholder.
     """
-    result = {
-        "description": "audio caption placeholder",
-        "keywords": [],
-        "bpm": "",
-        "genre": "electronic",
-        "moods": [],
-        "instruments": ["Mix"],
-        "timbre": "",
-        "dynamics": "",
-        "structure": ""
-    }
-    
-    # Extraer descripción del tagger
-    description_text = ""
     if isinstance(raw, dict):
-        for key in ("caption", "text", "label", "labels", "tags", "predictions", "prediction", "description"):
+        for key in (
+            "caption",
+            "text",
+            "label",
+            "labels",
+            "tags",
+            "predictions",
+            "prediction",
+            "description",
+        ):
             if key in raw and raw[key]:
                 val = raw[key]
                 if isinstance(val, (list, tuple)):
-                    description_text = ", ".join([str(v).strip() for v in val if v])
-                else:
-                    description_text = str(val).strip()
-                break
-    elif isinstance(raw, (list, tuple)):
-        description_text = ", ".join([str(v).strip() for v in raw if v])
-    elif isinstance(raw, str):
-        description_text = raw.strip()
-    
-    result["description"] = description_text if description_text else "audio caption placeholder"
-    
-    # Si tenemos la ruta del archivo, podemos hacer análisis adicional
-    if audio_path and os.path.exists(audio_path):
-        try:
-            # Análisis con librosa
-            y, sr = librosa.load(audio_path, sr=None, mono=True)
-            duration = librosa.get_duration(y=y, sr=sr)
-            
-            # BPM - manejar correctamente los arrays de numpy
-            tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
-            # tempo puede ser un array, tomamos el primer valor o el promedio
-            if isinstance(tempo, np.ndarray):
-                tempo_val = float(tempo[0]) if len(tempo) > 0 else 0.0
-            else:
-                tempo_val = float(tempo) if tempo > 0 else 0.0
-            result["bpm"] = str(round(tempo_val)) if tempo_val > 0 else ""
-            
-            # Spectral features para timbre
-            spectral_centroids = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
-            avg_centroid = float(np.mean(spectral_centroids))
-            if avg_centroid < 2000:
-                timbre = "dark"
-            elif avg_centroid < 4000:
-                timbre = "warm"
-            else:
-                timbre = "bright"
-            result["timbre"] = timbre
-            
-            # RMS para dinámica
-            rms = librosa.feature.rms(y=y)[0]
-            avg_rms = float(np.mean(rms))
-            if avg_rms < 0.05:
-                dynamics = "soft"
-            elif avg_rms < 0.15:
-                dynamics = "medium"
-            else:
-                dynamics = "loud"
-            result["dynamics"] = dynamics
-            
-            # Estructura básica por duración
-            if duration < 30:
-                structure = "loop"
-            elif duration < 120:
-                structure = "intro"
-            else:
-                structure = "full track"
-            result["structure"] = structure
-            
-            # Keywords basadas en análisis
-            keywords = []
-            if tempo_val > 120:
-                keywords.append("energetic")
-            if "bright" in timbre:
-                keywords.append("crisp")
-            if "loud" in dynamics:
-                keywords.append("powerful")
-            if duration > 300:  # 5 minutos
-                keywords.append("epic")
-            result["keywords"] = keywords
-            
-            # Mood básico
-            if tempo_val > 100:
-                moods = ["uplifting", "energetic"]
-            elif tempo_val > 60:
-                moods = ["calm", "reflective"]
-            else:
-                moods = ["ambient", "meditative"]
-            result["moods"] = moods
-            
-        except Exception as e:
-            logger.warning(f"Error en análisis de audio {audio_path}: {e}")
-            logger.debug(f"Tipo de error: {type(e).__name__}")
-    
-    return result
+                    return ", ".join([str(v).strip() for v in val if v])
+                return str(val).strip()
+    if isinstance(raw, (list, tuple)):
+        return ", ".join([str(v).strip() for v in raw if v])
+    if isinstance(raw, str):
+        return raw.strip()
+    for attr in ("caption", "text"):
+        if hasattr(raw, attr):
+            val = getattr(raw, attr)
+            if val:
+                return str(val).strip()
+    return "audio caption placeholder"
 
 
 # --------------------------------------------------------------------------- #
@@ -432,10 +428,11 @@ def _extract_description(raw: Any, audio_path: str = None) -> dict:
 # --------------------------------------------------------------------------- #
 def generate_metadata(dataset_dir: str) -> str:
     """
-    Recorre `dataset_dir` y crea un `metadata.jsonl` con información completa.
+    Recorre `dataset_dir` y crea un `metadata.jsonl` con el **formato completo**
+    que indicas.
     """
     if not tagger_loaded:
-        return "❌ El modelo de audio-tagging no está disponible. Revisa los logs."
+        return "❌ El modelo de audio‑tagging no está disponible. Revisa los logs."
 
     root = Path(dataset_dir)
     if not root.is_dir():
@@ -447,9 +444,6 @@ def generate_metadata(dataset_dir: str) -> str:
         return f"⚠️ No se encontraron archivos de audio en {dataset_dir}"
 
     out_path = root / "metadata.jsonl"
-    success_count = 0
-    error_count = 0
-    
     with out_path.open("w", encoding="utf-8") as out_f:
         for audio_path in tqdm.tqdm(
             audio_files, desc="Generando metadata con captioning.py"
@@ -480,315 +474,28 @@ def generate_metadata(dataset_dir: str) -> str:
                 logger.warning(
                     f"Error del tagger en {audio_path.name}: {raw_res['error']}"
                 )
-                audio_info = _extract_description({}, str(audio_path))
-                error_count += 1
+                description = "audio caption placeholder"
             else:
-                audio_info = _extract_description(raw_res, str(audio_path))
-                success_count += 1
-
-            # Construir caption completo
-            description_parts = []
-            if audio_info["description"] and audio_info["description"] != "audio caption placeholder":
-                description_parts.append(audio_info["description"])
-            if audio_info["timbre"]:
-                description_parts.append(f"{audio_info['timbre']} timbre")
-            if audio_info["dynamics"]:
-                description_parts.append(f"{audio_info['dynamics']} dynamics")
-            if audio_info["structure"]:
-                description_parts.append(audio_info["structure"])
-            
-            full_description = ", ".join(description_parts) if description_parts else "audio caption placeholder"
+                description = _extract_description(raw_res)
 
             caption_dict = {
-                "key": "",
-                "artist": "Tonetxo",
-                "sample_rate": int(sr),
+                "key": "", "artist": "Voyager I", "sample_rate": int(sr),
                 "file_extension": audio_path.suffix.lstrip("."),
-                "description": full_description,
-                "keywords": ", ".join(audio_info["keywords"]) if audio_info["keywords"] else "",
-                "duration": round(float(duration), 2),
-                "bpm": audio_info["bpm"],
-                "genre": audio_info["genre"],
-                "title": audio_path.stem.replace("_", " ").title(),
-                "name": audio_path.stem,
-                "instrument": ", ".join(audio_info["instruments"]) if audio_info["instruments"] else "Mix",
-                "moods": audio_info["moods"],
-                "file_name": audio_path.name,
-                "audio_filepath": str(audio_path)
+                "description": description, "keywords": "", "duration": round(duration, 2),
+                "bpm": "", "genre": "electronic", "title": "Untitled song",
+                "name": audio_path.stem, "instrument": "Mix", "moods": [],
             }
-            
-            # Agregar campos adicionales si existen
-            if audio_info.get("timbre"):
-                caption_dict["timbre"] = audio_info["timbre"]
-            if audio_info.get("dynamics"):
-                caption_dict["dynamics"] = audio_info["dynamics"]
-            if audio_info.get("structure"):
-                caption_dict["structure"] = audio_info["structure"]
-
             out_f.write(json.dumps(caption_dict, ensure_ascii=False) + "\n")
 
-    return f"✅ metadata.jsonl creado en: {out_path} (Éxito: {success_count}, Errores: {error_count})"
+    return f"✅ metadata.jsonl creado en: {out_path}"
 
-# === NUEVA FUNCIÓN: Augmentar Dataset ===
-# === CORREGIDO: Augmentar Dataset ===
-def augment_dataset_simple(input_dataset_path: str, output_dataset_path: str) -> str:
-    """
-    Augmenta un dataset de audio aplicando transformaciones simples.
-    """
-    logger.info(f"Iniciando augmentación de dataset: {input_dataset_path} -> {output_dataset_path}")
-    
-    input_path = Path(input_dataset_path)
-    output_path = Path(output_dataset_path)
-    augmented_audio_dir = output_path / "augmented_audio"
-    
-    # Validar directorio de entrada
-    if not input_path.is_dir():
-        return f"❌ Directorio de entrada inválido: {input_dataset_path}"
 
-    metadata_file = input_path / "metadata.jsonl"
-    if not metadata_file.exists():
-        return f"❌ No se encontró 'metadata.jsonl' en {input_dataset_path}"
-
-    # Crear directorios de salida
-    try:
-        output_path.mkdir(parents=True, exist_ok=True)
-        augmented_audio_dir.mkdir(exist_ok=True)
-    except Exception as e:
-        return f"❌ Error creando directorio de salida: {e}"
-
-    def simple_augment_audio(y, sr, filename_prefix):
-        """Aplica augmentaciones simples al audio."""
-        augmented_samples = []
-        
-        # Pitch Shift
-        try:
-            y_pitch_down = librosa.effects.pitch_shift(y, sr=sr, n_steps=-1)
-            augmented_samples.append((y_pitch_down, sr, f"{filename_prefix}_pitch_down1"))
-        except Exception:
-            pass # Omitir si falla
-            
-        try:
-            y_pitch_up = librosa.effects.pitch_shift(y, sr=sr, n_steps=1)
-            augmented_samples.append((y_pitch_up, sr, f"{filename_prefix}_pitch_up1"))
-        except Exception:
-            pass
-            
-        # Time Stretch
-        try:
-            y_stretch_slow = librosa.effects.time_stretch(y, rate=0.98)
-            augmented_samples.append((y_stretch_slow, sr, f"{filename_prefix}_stretch_slow"))
-        except Exception:
-            pass
-            
-        try:
-            y_stretch_fast = librosa.effects.time_stretch(y, rate=1.02)
-            augmented_samples.append((y_stretch_fast, sr, f"{filename_prefix}_stretch_fast"))
-        except Exception:
-            pass
-            
-        # Volumen
-        y_vol_down = np.clip(y * 0.9, -1.0, 1.0)
-        augmented_samples.append((y_vol_down, sr, f"{filename_prefix}_vol_down"))
-        
-        y_vol_up = np.clip(y * 1.1, -1.0, 1.0)
-        augmented_samples.append((y_vol_up, sr, f"{filename_prefix}_vol_up"))
-        
-        return augmented_samples
-
-    total_samples = 0
-    new_metadata_path = output_path / "metadata.jsonl"
-    
-    try:
-        with open(metadata_file, 'r', encoding='utf-8') as f_in, \
-             open(new_metadata_path, 'w', encoding='utf-8') as f_out:
-            
-            # Leer todas las líneas originales
-            original_lines = [line.strip() for line in f_in if line.strip()]
-            
-            # 1. Copiar muestras originales PERO con rutas actualizadas
-            logger.info(f"Procesando {len(original_lines)} muestras originales...")
-            for line in original_lines:
-                try:
-                    data = json.loads(line)
-                                                            # --- INICIO DEL BLOQUE CORREGIDO PARA MUESTRAS ORIGINALES ---
-                    # 1. Definir la ruta absoluta del archivo original
-                    original_audio_path_str = data['audio_filepath']
-                    original_audio_path = Path(original_audio_path_str)
-                    
-                    # Si la ruta en el JSON original es relativa, convertirla a absoluta
-                    # basándonos en el directorio del dataset original
-                    if not original_audio_path.is_absolute():
-                        original_audio_path = input_path / original_audio_path
-                        
-                    if not original_audio_path.exists():
-                        logger.warning(f"Archivo original no encontrado, saltando: {original_audio_path}")
-                        continue
-                        
-                    # 2. Definir la ruta donde se copiará el archivo (y su ruta absoluta)
-                    original_filename = data['file_name']
-                    new_audio_path_obj = augmented_audio_dir / original_filename
-                    new_audio_path_absolute_str = str(new_audio_path_obj.resolve()) # <-- .resolve() para ruta absoluta canónica
-                    
-                    # 3. Copiar el archivo
-                    import shutil
-                    shutil.copy2(original_audio_path, new_audio_path_obj) # <-- Copiar a la ruta Path
-                    logger.debug(f"Copiado: {original_audio_path} -> {new_audio_path_obj}")
-                    
-                    # 4. Crear una nueva entrada para el metadata.jsonl copiado
-                    new_data_entry = data.copy()
-                    # *** LÍNEA CRÍTICA CORREGIDA ***
-                    new_data_entry['audio_filepath'] = new_audio_path_absolute_str # <-- RUTA ABSOLUTA
-                    
-                    # 5. Escribir la entrada actualizada en el nuevo metadata.jsonl
-                    f_out.write(json.dumps(new_data_entry, ensure_ascii=False) + '\n')
-                    total_samples += 1
-                    # --- FIN DEL BLOQUE CORREGIDO PARA MUESTRAS ORIGINALES ---
-                        
-                except Exception as e:
-                    logger.error(f"Error procesando muestra original: {e}")
-                    continue
-            
-            logger.info(f"Copiadas {len(original_lines)} muestras originales")
-            
-            # 2. Augmentar cada muestra original
-            for i, line in enumerate(tqdm.tqdm(original_lines, desc="Augmentando")):
-                try:
-                    data = json.loads(line)
-                    original_audio_path = Path(data['audio_filepath'])
-                    
-                    # Verificar que el archivo existe
-                    if not original_audio_path.exists():
-                        logger.warning(f"Archivo no encontrado, saltando: {original_audio_path}")
-                        continue
-                        
-                    # Cargar audio
-                    y, sr = librosa.load(str(original_audio_path), sr=None, mono=True)
-                    
-                    # Generar augmentaciones
-                    filename_prefix = original_audio_path.stem
-                    augmented_samples = simple_augment_audio(y, sr, filename_prefix)
-                    
-                    # Guardar cada augmentación
-                    for aug_y, aug_sr, aug_name in augmented_samples:
-                        try:
-                                                        # --- INICIO DEL BLOQUE CORREGIDO PARA MUESTRAS AUGMENTADAS ---
-                            # 1. Generar el nombre de archivo y la ruta Path
-                            new_audio_filename = f"{aug_name}.wav"
-                            new_audio_path_obj = augmented_audio_dir / new_audio_filename
-                            new_audio_path_absolute_str = str(new_audio_path_obj.resolve()) # <-- .resolve() para ruta absoluta canónica
-                            
-                            # 2. Guardar el audio augmentado
-                            sf.write(new_audio_path_absolute_str, aug_y, aug_sr) # <-- Usar la ruta absoluta para guardar
-                            logger.debug(f"Guardado augmentado: {new_audio_path_absolute_str}")
-                            
-                            # 3. Crear nueva entrada en metadata con RUTA ABSOLUTA
-                            new_data = data.copy()
-                            new_data['name'] = aug_name
-                            new_data['title'] = f"{data['title']} ({aug_name.split('_')[-1]})"
-                            new_data['file_name'] = new_audio_filename
-                            # *** LÍNEA CRÍTICA CORREGIDA ***
-                            new_data['audio_filepath'] = new_audio_path_absolute_str # <-- Usar la ruta absoluta
-                            
-                            new_data['description'] = f"{data['description']} (augmented)"
-                            
-                            # 4. Escribir la entrada en el nuevo metadata.jsonl
-                            f_out.write(json.dumps(new_data, ensure_ascii=False) + '\n')
-                            total_samples += 1
-                            # --- FIN DEL BLOQUE CORREGIDO PARA MUESTRAS AUGMENTADAS ---                            
-                            
-                        except Exception as e:
-                            logger.error(f"Error guardando augmentación {aug_name}: {e}")
-                            continue
-                            
-                except Exception as e:
-                    logger.error(f"Error procesando muestra {i}: {e}")
-                    continue
-    
-        logger.info(f"✅ Dataset augmentado: {total_samples} muestras totales")
-        return f"✅ Dataset augmentado: {total_samples} muestras generadas en {output_path}"
-        
-    except Exception as e:
-        logger.error(f"Error en augmentación: {e}")
-        return f"❌ Error en augmentación: {str(e)}"
-
-# === NUEVA FUNCIÓN: Guardar audio generado ===
-def save_generated_audio(audio_data: Tuple[int, Any], output_dir: str = "./generated_audio") -> str:
-    """
-    Guarda el audio generado en formato WAV.
-    
-    Args:
-        audio_data: Tupla (sample_rate, audio_numpy_array) del componente gr.Audio
-        output_dir: Directorio donde guardar el audio
-    
-    Returns:
-        str: Ruta del archivo guardado o mensaje de error
-    """
-    if audio_data is None:
-        return "❌ No hay audio para guardar"
-    
-    sr, audio_np = audio_data
-    
-    if audio_np is None or len(audio_np) == 0:
-        return "❌ Audio vacío"
-    
-    # Crear directorio si no existe
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Generar nombre de archivo único
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"musicgen_generated_{timestamp}.wav"
-    filepath = os.path.join(output_dir, filename)
-    
-    try:
-        # soundfile espera (time, channels) para estéreo
-        if audio_np.ndim == 2 and audio_np.shape[1] <= 2:
-            # Ya está en formato correcto (time, channels)
-            pass
-        elif audio_np.ndim == 2 and audio_np.shape[0] <= 2:
-            # Está en (channels, time), hay que transponer
-            audio_np = audio_np.T
-        # Para mono, debe ser 1D
-        elif audio_np.ndim == 1:
-            pass # Correcto
-        else:
-            # Fallback: intentar squeeze
-            audio_np = audio_np.squeeze()
-            
-        sf.write(filepath, audio_np, sr)
-        logger.info(f"✅ Audio guardado en: {filepath}")
-        return f"✅ Guardado: {filepath}"
-    except Exception as e:
-        error_msg = f"❌ Error guardando audio: {str(e)}"
-        logger.error(error_msg)
-        return error_msg
 # --------------------------------------------------------------------------- #
 # ENTRENAMIENTO (DreamBooth) ------------------------------------------------ #
 # --------------------------------------------------------------------------- #
-# === CORREGIDO: ENTRENAMIENTO (DreamBooth) ===
-import time # Asegúrate de que 'time' esté importado
-
 def modify_and_run_training(
-    dataset_path, output_dir, epochs, lr, lora_r, lora_alpha, max_duration, train_seed,
-    use_augmented=False, augmented_path=""
+    dataset_path, output_dir, epochs, lr, lora_r, lora_alpha, max_duration, train_seed
 ) -> Generator[str, None, None]:
-    """
-    Modifica y ejecuta el script de entrenamiento, mostrando logs acumulados en tiempo real.
-    """
-    # Si se debe usar el dataset augmentado:
-        # === CORREGIDO: Determinar y definir siempre absolute_dataset_path ===
-    # Elegir la ruta del dataset a usar
-    if use_augmented and augmented_path and os.path.exists(augmented_path):
-        dataset_path_to_use = augmented_path
-        logger.info(f"Usando dataset augmentado: {dataset_path_to_use}")
-    else:
-        dataset_path_to_use = dataset_path
-        # Opcional: logger.info(f"Usando dataset original: {dataset_path_to_use}")
-
-    # Convertir la ruta elegida a una ruta absoluta
-    # Esta línea SIEMPRE se ejecuta, definiendo absolute_dataset_path
-    absolute_dataset_path = os.path.abspath(dataset_path_to_use)
-    logger.info(f"Usando ruta de dataset absoluta: {absolute_dataset_path}")
-    # === FIN DE LA CORRECCIÓN ===
     script_path = "./musicgen-dreamboothing/dreambooth_musicgen.py"
     try:
         with open(script_path, "r", encoding="utf-8") as f:
@@ -800,73 +507,33 @@ def modify_and_run_training(
             f.write(script_content)
         yield f"✅ Script modificado: r={int(lora_r)}, lora_alpha={int(lora_alpha)}\n"
     except Exception as e:
-        yield f"❌ Error al modificar script: {e}\n"
+        yield f"❌ Error al modificar script: {e}"
         return
 
     command = [
         "accelerate", "launch", "dreambooth_musicgen.py",
-        f"--model_name_or_path={MODEL_ID}", f"--dataset_name={absolute_dataset_path}",
+        f"--model_name_or_path={MODEL_ID}", f"--dataset_name={dataset_path}",
         f"--output_dir={output_dir}", f"--num_train_epochs={int(epochs)}",
-        "--use_lora", f"--learning_rate={lr}", "--max_grad_norm=1.0", "--warmup_steps=100", "--per_device_train_batch_size=1", 
-        "--gradient_accumulation_steps=8", "--dataloader_num_workers=0", "--fp16", "--text_column_name=description",
+        "--use_lora", f"--learning_rate={lr}", "--per_device_train_batch_size=1",
+        "--gradient_accumulation_steps=4", "--fp16", "--text_column_name=description",
         "--target_audio_column_name=audio_filepath", "--train_split_name=train",
         "--overwrite_output_dir", "--do_train", "--decoder_start_token_id=2048",
         f"--max_duration_in_seconds={int(max_duration)}", "--gradient_checkpointing",
         f"--seed={int(train_seed)}",
-        "--logging_steps=1",
-        "--logging_strategy=steps", 
-        "--logging_first_step=True",
-        "--save_strategy=steps",
-        "--save_steps=30", 
     ]
 
-    # Inicializar el acumulador de logs
-    full_log = "🚀 Lanzando entrenamiento...\n\n"
-    yield full_log
-
+    yield "🚀 Lanzando entrenamiento...\n\n"
     process = subprocess.Popen(
-        command,
-        cwd="./musicgen-dreamboothing",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        bufsize=1,
-        universal_newlines=True
+        command, cwd="./musicgen-dreamboothing", stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True, encoding="utf-8",
     )
-
-    # Leer la salida línea por línea en tiempo real
-    try:
-        for line in iter(process.stdout.readline, ''):
-            if line:  # Solo procesar líneas no vacías
-                # Limpiar la línea de retornos de carro al final
-                clean_line = line.rstrip('\n\r')
-                if clean_line: # Solo añadir si después de limpiar no está vacía
-                    # Añadir la nueva línea al log acumulado
-                    full_log += clean_line + "\n"
-                    # Yield el log acumulado completo para actualizar la UI
-                    yield full_log
-        # El iterador termina cuando el proceso cierra stdout
-    except Exception as e:
-        error_line = f"[ERROR - Excepción al leer stdout] {e}\n"
-        full_log += error_line
-        yield full_log
-    finally:
-        # Esperar a que el proceso termine
-        process.wait()
-
-    # Añadir el resultado final
+    for line in iter(process.stdout.readline, ""):
+        yield line
+    process.wait()
     if process.returncode == 0:
-        final_msg = "\n✅ ¡Entrenamiento finalizado exitosamente!"
+        yield "\n✅ ¡Entrenamiento finalizado!"
     else:
-        final_msg = f"\n❌ Proceso terminó con código de error: {process.returncode}"
-
-    full_log += final_msg
-    yield full_log
-
-
-
-
+        yield f"\n❌ Proceso terminó con código {process.returncode}"
 
 
 # --------------------------------------------------------------------------- #
@@ -876,43 +543,44 @@ def switch_model_and_state(lora_files: List[str]) -> Tuple[Dict[str, Any], str]:
     """
     Carga un LoRA a partir de una lista de archivos temporales de Gradio.
     """
-    global base_model
     logger.info(f"Cambiando modelo. Archivos LoRA recibidos: {lora_files}")
 
+    # Usar la variable global base_model
+    global base_model
+    
     # Liberar memoria primero
-    try:
-        if hasattr(base_model, 'to'):
-            base_model.to("cpu")
-        torch.cuda.empty_cache()
-    except Exception as e:
-        logger.warning(f"Advertencia al mover modelo a CPU: {e}")
+    if hasattr(base_model, 'to'):
+        base_model.to("cpu")
+    torch.cuda.empty_cache()
 
-    # Si no hay archivos LoRA, volver al modelo base
+    # Si la lista está vacía o es None, volvemos al modelo base ORIGINAL
     if not lora_files or all(f is None for f in lora_files):
         try:
-            logger.info("Limpiando y recreando modelo base...")
+            # RECREAR el modelo base desde cero para asegurar que no hay LoRA
+            logger.info("Recreando modelo base limpio...")
             
-            # Eliminar modelo actual
+            # Liberar memoria del modelo actual
             del base_model
             torch.cuda.empty_cache()
             
-            # Recrear modelo base limpio
+            # Recargar el modelo base completamente desde cero
             base_model = MusicgenForConditionalGeneration.from_pretrained(
                 MODEL_ID,
                 torch_dtype=torch.float16,
             )
             
-            # Reaplicar Flash Attention
+            # Reaplicar configuración de flash attention
             if hasattr(base_model.config, "use_flash_attention_2"):
                 base_model.config.use_flash_attention_2 = True
-            if hasattr(base_model, "text_encoder") and hasattr(base_model.text_encoder.config, "use_flash_attention_2"):
-                base_model.text_encoder.config.use_flash_attention_2 = False
-                
+            if hasattr(base_model, "text_encoder"):
+                if hasattr(base_model.text_encoder.config, "use_flash_attention_2"):
+                    base_model.text_encoder.config.use_flash_attention_2 = False
+            
             logger.info("✅ Modelo base recreado exitosamente")
             
         except Exception as e:
             logger.error(f"Error recreando modelo base: {e}")
-            # Fallback: cargar modelo base de nuevo
+            # Si falla, intentar cargar de nuevo el modelo
             base_model = MusicgenForConditionalGeneration.from_pretrained(
                 MODEL_ID,
                 torch_dtype=torch.float16,
@@ -923,34 +591,26 @@ def switch_model_and_state(lora_files: List[str]) -> Tuple[Dict[str, Any], str]:
         new_state = {"model": base_model, "lora_path": None}
         
     else:
-        # Cargar LoRA
         try:
+            # Crear un directorio temporal único para los archivos LoRA
             import tempfile
-            import shutil
             
-            # Crear directorio temporal
             lora_temp_dir = tempfile.mkdtemp()
-            logger.info(f"Directorio temporal para LoRA: {lora_temp_dir}")
+            logger.info(f"Creando directorio temporal para LoRA: {lora_temp_dir}")
             
-            # Copiar archivos
+            # Copiar todos los archivos al directorio temporal
             for file_path in lora_files:
                 if file_path and file_path != "None":
                     filename = os.path.basename(file_path)
                     dest_path = os.path.join(lora_temp_dir, filename)
                     shutil.copy2(file_path, dest_path)
-                    logger.info(f"Copiado: {filename}")
+                    logger.info(f"Copiado {filename} a {lora_temp_dir}")
             
-            # Verificar archivos requeridos
-            required_files = {"adapter_config.json", "adapter_model.safetensors"}
-            files_in_dir = set(os.listdir(lora_temp_dir))
-            
-            if not required_files.issubset(files_in_dir):
-                missing = required_files - files_in_dir
-                raise ValueError(f"Faltan archivos LoRA: {missing}")
-            
+            # Verificar que tenemos los archivos necesarios
+            files_in_dir = os.listdir(lora_temp_dir)
             logger.info(f"Archivos en directorio temporal: {files_in_dir}")
             
-            # Limpiar modelo base si tiene LoRA cargado
+            # Asegurarse de que el modelo base esté limpio primero
             if hasattr(base_model, 'peft_config'):
                 logger.info("Limpiando modelo base antes de cargar LoRA...")
                 del base_model
@@ -960,48 +620,35 @@ def switch_model_and_state(lora_files: List[str]) -> Tuple[Dict[str, Any], str]:
                     torch_dtype=torch.float16,
                 )
             
-            # Cargar LoRA
+            # Cargar el LoRA desde el directorio temporal
             active_model = PeftModel.from_pretrained(base_model, lora_temp_dir)
-            logger.info("✅ LoRA cargado exitosamente")
-            
-            # Aplicar Flash Attention al modelo LoRA
+
             if hasattr(active_model.config, "use_flash_attention_2"):
                 active_model.config.use_flash_attention_2 = True
-            if hasattr(active_model, "text_encoder") and hasattr(active_model.text_encoder.config, "use_flash_attention_2"):
-                active_model.text_encoder.config.use_flash_attention_2 = False
-            
-            status = "✅ LoRA activo"
+            if hasattr(active_model, "text_encoder"):
+                if hasattr(active_model.text_encoder.config, "use_flash_attention_2"):
+                    active_model.text_encoder.config.use_flash_attention_2 = False
+
+            status = f"✅ LoRA activo"
             new_state = {"model": active_model, "lora_path": lora_temp_dir}
             
         except Exception as e:
             logger.error(f"Error cargando LoRA: {e}")
-            
-            # Limpiar directorio temporal
+            # Limpiar el directorio temporal en caso de error
             if 'lora_temp_dir' in locals():
                 shutil.rmtree(lora_temp_dir, ignore_errors=True)
             
-            # Fallback a modelo base
-            try:
-                base_model = MusicgenForConditionalGeneration.from_pretrained(
-                    MODEL_ID,
-                    torch_dtype=torch.float16,
-                )
-            except Exception as fallback_error:
-                logger.error(f"Error en fallback a modelo base: {fallback_error}")
-                # Último fallback - devolver el modelo base actual
-                pass
-                
+            # Asegurarse de tener un modelo base limpio
+            base_model = MusicgenForConditionalGeneration.from_pretrained(
+                MODEL_ID,
+                torch_dtype=torch.float16,
+            )
             active_model = base_model
-            status = f"❌ Error al cargar LoRA: {str(e)[:100]}..."
+            status = f"❌ Error al cargar LoRA: {e}"
             new_state = {"model": base_model, "lora_path": None}
     
-    # Mover modelo a CPU y limpiar cache
-    try:
-        active_model.to("cpu")
-        torch.cuda.empty_cache()
-    except Exception as e:
-        logger.warning(f"Advertencia al mover modelo a CPU después de carga: {e}")
-    
+    active_model.to("cpu")
+    torch.cuda.empty_cache()
     logger.info(status)
     return new_state, status
 
@@ -1020,30 +667,26 @@ def generate_music_with_state(
     """
     Genera audio gestionando el estado del modelo y cambiando LoRA si es necesario.
     """
-    logger.info("Iniciando generación de audio...")
-
-    # Inicializar active_model con el modelo del estado actual
-    active_model = current_state["model"]
-    status = "Usando modelo actual"
-
     # Detectar si queremos volver al modelo base
     want_base_model = (not lora_path_from_file_input or 
                       all(f is None for f in lora_path_from_file_input))
     
     # Detectar si actualmente tenemos LoRA cargado
     has_lora_loaded = current_state["lora_path"] is not None
-
-    # Forzar cambio si es necesario
+    
+    # Siempre forzar el cambio si queremos modelo base pero tenemos LoRA
     if want_base_model and has_lora_loaded:
         logger.info("Forzando cambio a modelo base...")
         new_state, status = switch_model_and_state([])
         active_model = new_state["model"]
         current_state = new_state
     elif not want_base_model and not has_lora_loaded:
+        # Queremos LoRA pero tenemos modelo base
         new_state, status = switch_model_and_state(lora_path_from_file_input)
         active_model = new_state["model"]
         current_state = new_state
     elif not want_base_model and has_lora_loaded:
+        # Queremos LoRA y ya tenemos uno cargado, verificar si son diferentes
         current_files = set()
         if current_state["lora_path"] and os.path.exists(current_state["lora_path"]):
             current_files = set(os.listdir(current_state["lora_path"]))
@@ -1053,6 +696,7 @@ def generate_music_with_state(
             if file_path and file_path != "None":
                 new_files.add(os.path.basename(file_path))
         
+        # Si los archivos son diferentes, necesitamos cambiar
         if new_files != current_files:
             new_state, status = switch_model_and_state(lora_path_from_file_input)
             active_model = new_state["model"]
@@ -1064,68 +708,29 @@ def generate_music_with_state(
         status = "✅ Modelo Base Activo"
         active_model = current_state["model"]
 
-    # Mover modelo a GPU
-    active_model = active_model.to("cuda")
-    logger.info("Modelo movido a GPU")
+    active_model.to("cuda")
+    logger.info("Generando audio en GPU...")
 
-    # Semilla
     if seed is not None and int(seed) != -1:
         torch.manual_seed(int(seed))
         torch.cuda.manual_seed_all(int(seed))
-        logger.info(f"Semilla fijada: {seed}")
 
-    # Tokenizar prompt
     inputs = processor(text=[prompt], padding=True, return_tensors="pt").to("cuda")
-    logger.info(f"Prompt procesado: {prompt}")
+    if topk == 0 and topp == 0.0:
+        topk = 250
 
-    # Limitar tokens para evitar artefactos
-    max_tokens = min(int(duration * 50), 2048)
-    logger.info(f"Duración solicitada: {duration}s → max_new_tokens: {max_tokens}")
+    audio = active_model.generate(
+        **inputs, max_new_tokens=int(duration * 50), do_sample=True,
+        guidance_scale=guidance, temperature=temp, top_k=int(topk),
+        top_p=topp if topp > 0 else None,
+    )
 
-    # Generar audio
-    with torch.no_grad():
-        audio_codes = active_model.generate(
-            **inputs,
-            max_new_tokens=max_tokens,
-            do_sample=True,
-            guidance_scale=guidance,
-            temperature=temp,
-            top_k=int(topk) if topk > 0 else 250,
-            top_p=topp if topp > 0 else None,
-        )
-
-    logger.info(f"Audio codes generado. Forma: {audio_codes.shape}")
-
-    # Mover modelo de vuelta a CPU
-    active_model = active_model.to("cpu")
+    active_model.to("cpu")
     torch.cuda.empty_cache()
-    logger.info("Modelo movido a CPU y VRAM liberada")
+    logger.info("✅ Generación completada, VRAM liberada")
 
-    # Conversión correcta del tensor a audio
-    try:
-        # Para MusicGen, el tensor generado ya es la waveform
-        if audio_codes.dim() == 3:  # (batch, channels, time)
-            audio_np = audio_codes[0].cpu().numpy()  # (channels, time)
-            if audio_np.shape[0] <= 2:  # stereo o mono
-                audio_np = audio_np.T  # (time, channels)
-            else:
-                audio_np = audio_np[0]  # mono
-        elif audio_codes.dim() == 2:  # (batch, time) o (channels, time)
-            audio_np = audio_codes[0].cpu().numpy() if audio_codes.shape[0] == 1 else audio_codes.cpu().numpy()
-            if audio_np.ndim == 2 and audio_np.shape[0] <= 2:
-                audio_np = audio_np.T
-        else:
-            audio_np = audio_codes.cpu().numpy()
-            
-    except Exception as e:
-        logger.error(f"Error en conversión de audio: {e}")
-        # Fallback seguro
-        audio_np = np.zeros((32000 * duration,))  # array de silencio
-
-    sr = 32000  # MusicGen usa 32kHz
-
-    logger.info(f"Audio final convertido. Forma: {audio_np.shape}")
-    logger.info("✅ Generación completada correctamente")
+    sr = base_model.config.audio_encoder.sampling_rate
+    audio_np = audio.cpu().numpy().squeeze()
     return current_state, status, (sr, audio_np)
 
 
@@ -1148,37 +753,31 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                 generate_metadata_button = gr.Button(
                     "🤖 Generar `metadata.jsonl` (con captioning.py)"
                 )
-                # === AÑADIR ESTO PARA AUGMENTACIÓN ===
-                augment_dataset_btn = gr.Button(
-                    "🔄 Augmentar Dataset"
-                )
-                # === HASTA AQUÍ ===
                 metadata_output = gr.Textbox(
                     label="Resultado", lines=2, interactive=False
                 )
-            # === AÑADIR ESTE BLOQUE PARA LOS NUEVOS CONTROLES ===
+            
+            # NUEVA SECCIÓN PARA MEJORAR CAPTIONS
             with gr.Row():
-                augmented_output_path = gr.Textbox(
-                    label="📂 Ruta de salida para dataset augmentado",
-                    value="./augmented_training_data",
+                enhance_captions_btn = gr.Button(
+                    "✨ Mejorar Captions con Ollama", 
+                    variant="secondary"
                 )
-                use_augmented_cb = gr.Checkbox(
-                    label="Usar dataset augmentado para entrenamiento",
-                    value=False
-                )    
+                enhance_captions_status = gr.Textbox(
+                    label="Estado mejora de captions", 
+                    lines=2, 
+                    interactive=False
+                )
+            
             with gr.Row():
                 output_dir_input = gr.Textbox(
                     label="📁 Carpeta de salida (LoRA)",
                     value=settings.get("output_dir", ""),
                 )
                 epochs_input = gr.Slider(
-                    label="Épocas", minimum=1, maximum=500, step=1, value=settings.get("epochs", 15)
+                    label="Épocas", minimum=1, maximum=100, step=1, value=settings.get("epochs", 15)
                 )
-                lr_input = gr.Number(
-                label="Learning Rate",
-                    value=settings.get("lr", 0.0001),
-                    precision=6
-                )
+                lr_input = gr.Number(label="Learning Rate", value=settings.get("lr", 0.0001))
             with gr.Row():
                 max_duration_input = gr.Slider(
                     label="Duración máx. del audio (s)",
@@ -1226,14 +825,11 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                     placeholder="Ej: Un solo de piano clásico...",
                     value=settings.get("inference_prompt", ""), lines=2,
                 )
-                # ---- INICIO DE LA MODIFICACIÓN ----
-                # Ahora acepta múltiples archivos (file_count="multiple")
                 lora_path_input = gr.File(
                     label="📂 Arrastra AQUÍ AMBOS archivos LoRA (config y safetensors)",
                     type="filepath",
                     file_count="multiple"
                 )
-                # ---- FIN DE LA MODIFICACIÓN ----
                 inference_seed_input = gr.Number(
                     label="Semilla (-1 = aleatoria)",
                     value=settings.get("inference_seed", -1), precision=0,
@@ -1264,17 +860,6 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                     step=0.05, value=settings.get("top_p", 0.0),
                 )
             audio_out = gr.Audio(label="Resultado", type="numpy")
-                        # === AÑADE ESTO: Botón para guardar el audio ===
-            with gr.Row():
-                save_audio_btn = gr.Button("💾 Guardar Audio Generado")
-                save_output = gr.Textbox(label="Estado del guardado", interactive=False)
-            
-            # === Y ESTO: Conectar el botón a la función ===
-            save_audio_btn.click(
-                fn=save_generated_audio,
-                inputs=audio_out,
-                outputs=save_output
-            )
 
     def on_select_prompt(name):
         return prompt_manager.get_prompt_text(name)
@@ -1292,7 +877,18 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
     enhance_btn.click(fn=ollama.enhance_and_translate_prompt, inputs=[ollama_model_dd, prompt_text_area, use_captions_cb, prep_dataset_path_input], outputs=prompt_text_area)
     use_in_inference_btn.click(fn=lambda txt: (txt, gr.Tabs(selected=2)), inputs=prompt_text_area, outputs=[prompt_input, tabs])
     generate_metadata_button.click(fn=generate_metadata, inputs=prep_dataset_path_input, outputs=metadata_output)
-    launch_train_btn.click(fn=modify_and_run_training, inputs=[prep_dataset_path_input, output_dir_input, epochs_input, lr_input, r_input, alpha_input, max_duration_input, train_seed_input, use_augmented_cb, augmented_output_path], outputs=train_log)
+    
+    # NUEVO EVENTO PARA MEJORAR CAPTIONS
+    enhance_captions_btn.click(
+        fn=lambda dataset_path, model: ollama.enhance_captions_for_musicgen(
+            model, 
+            os.path.join(dataset_path, "metadata.jsonl") if dataset_path else None
+        ),
+        inputs=[prep_dataset_path_input, ollama_model_dd],
+        outputs=enhance_captions_status
+    )
+    
+    launch_train_btn.click(fn=modify_and_run_training, inputs=[prep_dataset_path_input, output_dir_input, epochs_input, lr_input, r_input, alpha_input, max_duration_input, train_seed_input], outputs=train_log)
 
     lora_path_input.change(fn=switch_model_and_state, inputs=lora_path_input, outputs=[active_model_state, status_output])
 
@@ -1302,11 +898,6 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             inference_seed_input, guidance_slider, temperature_slider, topk_slider, topp_slider,
         ],
         outputs=[active_model_state, status_output, audio_out]
-    )
-    augment_dataset_btn.click(
-        fn=augment_dataset_simple,
-        inputs=[prep_dataset_path_input, augmented_output_path],
-        outputs=metadata_output
     )
 
     def _persist(key: str, val: Any) -> None:

@@ -256,15 +256,6 @@ class DataSeq2SeqTrainingArguments:
             "help": "Filter audio files that are shorter than `min_duration_in_seconds` seconds"
         },
     )
-    target_duration: float = field(
-        default=30.0,
-        metadata={
-            "help": (
-                "Forzar todos los audios a tener exactamente esta duración en segundos. "
-                "Se trunca si es más largo, se rellena con silencio si es más corto."
-            )
-        },
-    )
     full_generation_sample_text: str = field(
         default="80s blues track.",
         metadata={
@@ -397,7 +388,7 @@ class DataCollatorMusicGenWithPadding:
                 input_values, return_tensors="pt"
             )
 
-            batch[self.feature_extractor_input_name] = input_values  # Fixed key assignment
+            batch[self.feature_extractor_input_name : input_values]
 
         return batch
 
@@ -494,6 +485,7 @@ def main():
         # =====================================================================================
         # ========= FIN DE LA CORRECCIÓN FINAL ================================================
         # =====================================================================================
+
 
         if data_args.target_audio_column_name not in raw_datasets["train"].column_names:
             raise ValueError(
@@ -624,7 +616,7 @@ def main():
             import librosa
         except ImportError:
             print(
-                "To add metadata, you should install additional packages, run: `pip install -e .[metadata]`"
+                "To add metadata, you should install additional packages, run: `pip install -e .[metadata]]"
             )
         from utils import instrument_classes, genre_labels, mood_theme_classes
         import tempfile
@@ -769,9 +761,6 @@ def main():
     audio_encoder_pad_token_id = config.decoder.pad_token_id
     num_codebooks = model.decoder.config.num_codebooks
 
-    # Target samples for fixed duration
-    target_samples = int(data_args.target_duration * audio_encoder_feature_extractor.sampling_rate)
-
     if data_args.instance_prompt is not None:
         with training_args.main_process_first(desc="instance_prompt preprocessing"):
             # compute text embeddings on one process since it's only a forward pass
@@ -804,24 +793,13 @@ def main():
 
         # load audio
         target_sample = batch[target_audio_column_name]
-        audio_array = target_sample["array"].squeeze()
-
-        # Truncar o rellenar el audio a target_samples
-        current_length = len(audio_array)
-        if current_length > target_samples:
-            audio_array = audio_array[:target_samples]
-        elif current_length < target_samples:
-            pad_length = target_samples - current_length
-            audio_array = np.pad(audio_array, (0, pad_length), mode='constant', constant_values=0)
-
-        # Extraer características
         labels = audio_encoder_feature_extractor(
-            audio_array, sampling_rate=target_sample["sampling_rate"]
+            target_sample["array"], sampling_rate=target_sample["sampling_rate"]
         )
         batch["labels"] = labels["input_values"]
 
-        # longitud objetivo
-        batch["target_length"] = target_samples
+        # take length of raw audio waveform
+        batch["target_length"] = len(target_sample["array"].squeeze())
         return batch
 
     with training_args.main_process_first(desc="dataset map preprocessing"):
@@ -833,9 +811,9 @@ def main():
         )
 
         def is_audio_in_length_range(length):
-            return length == target_samples  # Ahora todos deben ser exactos
+            return length > min_target_length and length < max_target_length
 
-        # Filtrar por longitud exacta
+        # filter data that is shorter than min_target_length
         vectorized_datasets = vectorized_datasets.filter(
             is_audio_in_length_range,
             num_proc=num_workers,
@@ -981,7 +959,7 @@ def main():
 
         config = LoraConfig(
             r=32,
-            lora_alpha=64,
+            lora_alpha=32,
             target_modules=target_modules,
             lora_dropout=0.05,
             bias="none",
