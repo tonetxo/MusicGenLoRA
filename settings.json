@@ -1,22 +1,22 @@
 {
     "dataset_path": "/mnt/datos/ModeloAudio/training_data",
-    "output_dir": "./lora/324A64S180E10",
-    "epochs": 10,
-    "lr": 0.0001,
-    "lora_r": 32,
-    "lora_alpha": 64,
-    "max_duration": 180,
+    "output_dir": "./lora/324A64S180E10(augmented)",
+    "epochs": 30,
+    "lr": 5e-05,
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "max_duration": 200,
     "ollama_model": "gemma3:latest",
     "train_seed": 1,
-    "inference_prompt": "Create an ambient, medium tempo deep house music track with a warm, woody timbre. Featuring piano, synthesizer, marimba, glockenspiel, and xylophone instruments, the piece should have a strong beat that evolves throughout the loop. Add elements of train sounds like a distant railroad background to create a unique ambiance. The overall mood is sad yet uplifting with soft, dynamic changes in volume and intensity.",
+    "inference_prompt": "New ambient electronic theme.  Obstinate piano arpeggios, warm harp, rhythmic timpani.  Synth, glockenspiel, piano, and a driving electronic loop.  Dark and full dynamic sound.\n",
     "inference_duration": 15,
     "lora_path": [
-        "/tmp/gradio/f755020bc2bd95726dd0e4a2498fe439b74a04ef3b8ed90020071a25e8688151/adapter_config.json",
-        "/tmp/gradio/49b30e19ab3e2bbaf440aa44b8d63defc9d15681d51656b31727de213356b4b1/adapter_model.safetensors"
+        "/tmp/gradio/ed985544f260ebd6a918c9134cd7f367b7b980f47416be52b1ceff09ce051ae9/adapter_config.json",
+        "/tmp/gradio/886556c9549ec5731b6a17c24b71c607d0df6080e65afed76ab8ecbbf3edcae2/adapter_model.safetensors"
     ],
-    "inference_seed": 1,
-    "guidance_scale": 4,
-    "temperature": 1.05,
-    "top_k": 250,
-    "top_p": 0
+    "inference_seed": 3,
+    "guidance_scale": 3,
+    "temperature": 0.9,
+    "top_k": 60,
+    "top_p": 0.7
 }

@@ -818,6 +818,9 @@ def modify_and_run_training(
         "--logging_first_step=True",
         "--save_strategy=steps",
         "--save_steps=30", 
+        "--report_to=tensorboard",              # Opcional: usar tensorboard
+        "--logging_dir=./logs",                 # Directorio para logs
+        "--disable_tqdm=False",                 # Mantener progress bars
     ]
 
     # Inicializar el acumulador de logs
