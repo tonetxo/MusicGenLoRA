@@ -337,7 +337,7 @@ def augment_dataset_simple(input_dataset_path: str, output_dataset_path: str) ->
 # === ENTRENAMIENTO ===
 def modify_and_run_training(
     dataset_path, output_dir, epochs, lr, lora_r, lora_alpha, max_duration, train_seed,
-    use_augmented=False, augmented_path=""
+    use_augmented=False, augmented_path="", weight_decay=0.01
 ):
     dataset_path_to_use = augmented_path if use_augmented and augmented_path and os.path.exists(augmented_path) else dataset_path
     absolute_dataset_path = os.path.abspath(dataset_path_to_use)
@@ -369,6 +369,7 @@ def modify_and_run_training(
         "--instance_prompt=tonetxo_style",
         "--logging_steps=1",
         "--save_steps=30",
+        f"--weight_decay={weight_decay}",
     ]
 
     full_log = "🚀 Iniciando entrenamiento...\n"
@@ -492,6 +493,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             output_dir_input = gr.Textbox(label="Carpeta LoRA", value=settings.get("output_dir", ""))
             epochs_input = gr.Slider(label="Épocas", minimum=1, maximum=100, step=1, value=settings.get("epochs", 15))
             lr_input = gr.Number(label="LR", value=settings.get("lr", 0.0001), precision=6)
+            weight_decay_input = gr.Slider(label="Weight Decay", minimum=0.0, maximum=0.2, step=0.01, value=0.01)
             max_duration_input = gr.Slider(label="Duración (s)", minimum=5, maximum=30, value=settings.get("max_duration", 8))
             r_input = gr.Slider(label="R", minimum=4, maximum=128, step=4, value=settings.get("lora_r", 8))
             alpha_input = gr.Slider(label="Alpha", minimum=4, maximum=256, step=4, value=settings.get("lora_alpha", 16))
@@ -533,7 +535,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
     augment_dataset_btn.click(augment_dataset_simple, inputs=[prep_dataset_path_input, augmented_output_path], outputs=metadata_output)
     launch_train_btn.click(
         modify_and_run_training,
-        inputs=[prep_dataset_path_input, output_dir_input, epochs_input, lr_input, r_input, alpha_input, max_duration_input, train_seed_input, use_augmented_cb, augmented_output_path],
+        inputs=[prep_dataset_path_input, output_dir_input, epochs_input, lr_input, r_input, alpha_input, max_duration_input, train_seed_input, use_augmented_cb, augmented_output_path, weight_decay_input],
         outputs=train_log
     )
     prompt_select_dd.change(lambda name: prompt_manager.get_prompt_text(name), inputs=prompt_select_dd, outputs=prompt_text_area)
