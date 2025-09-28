@@ -1,0 +1,21 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Datasets y audio generado
+/augmented_training_data/
+/generated_audio/
+
+# Directorios de entrenamiento y logs
+/mi_lora_final/
+/musicgen-dreamboothing/lora_*/
+/musicgen-dreamboothing/wandb/
+/musicgen-dreamboothing/checkpoint-*/
+/log.txt
+*.log
+
+# Excluir archivos de log específicos de la raíz
+Sep*.json
+
+# Excluir archivos de texto generados
+*.txt
