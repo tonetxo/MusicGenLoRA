@@ -348,69 +348,26 @@ class AudioTagger:
         return " ".join(words)
 
     def generate_caption(self, labels: List[Dict]) -> str:
-        """Generar caption musical mejorado"""
+        """Generar caption simple y descriptivo a partir de las mejores etiquetas."""
         if not labels:
             return "electronic music, synth, drums"
         
-        # Filtrar y priorizar etiquetas musicales
-        musical_labels = []
-        seen = set()
-        
-        for label_info in labels:
-            cleaned = label_info["cleaned_label"]
-            confidence = label_info["confidence"]
+        # Tomar las 5 etiquetas limpias con mayor confianza, evitando duplicados.
+        seen_labels = set()
+        top_labels = []
+        # Ordenar por confianza para asegurar que tomamos las más relevantes
+        for label_info in sorted(labels, key=lambda x: x.get("confidence", 0), reverse=True):
+            cleaned = label_info.get("cleaned_label", "").strip()
+            if cleaned and cleaned not in seen_labels and len(cleaned) > 2:
+                seen_labels.add(cleaned)
+                top_labels.append(cleaned)
+            if len(top_labels) >= 5:  # Máximo 5 etiquetas
+                break
             
-            # Evitar duplicados y etiquetas vacías
-            if (cleaned and cleaned not in seen and 
-                confidence > 0.05 and  # Umbral mínimo para caption
-                len(cleaned) > 2):
-                
-                seen.add(cleaned)
-                musical_labels.append((cleaned, confidence))
-                
-                if len(musical_labels) >= 6:  # Máximo 6 etiquetas
-                    break
-        
-        if not musical_labels:
+        if not top_labels:
             return "electronic music, synth, drums"
-        
-        # Ordenar por confianza para caption
-        musical_labels.sort(key=lambda x: x[1], reverse=True)
-        main_labels = [label for label, conf in musical_labels[:4]]  # Tomar top 4
-        
-        # Construir caption con estructura musical lógica
-        instruments = [label for label in main_labels if any(word in label for word in 
-                    ["guitar", "piano", "violin", "sax", "trumpet", "bass", "drums", "synth", "vocals"])]
-        
-        effects = [label for label in main_labels if "effect" in label]
-        genres = [label for label in main_labels if label in ["electronic", "rock", "jazz", "classical"]]
-        
-        # Ensamblar caption de forma inteligente
-        caption_parts = []
-        
-        if genres:
-            caption_parts.append(genres[0])
-        elif "electronic" in main_labels:
-            caption_parts.append("electronic")
-        
-        if instruments:
-            caption_parts.extend(instruments[:3])
-        
-        if effects:
-            caption_parts.append(effects[0])
-        
-        # Si no hay suficientes etiquetas, añadir algunas por defecto
-        if len(caption_parts) < 3:
-            defaults = ["synth", "drums", "bass"]
-            for default in defaults:
-                if default not in " ".join(caption_parts):
-                    caption_parts.append(default)
-                if len(caption_parts) >= 4:
-                    break
-        
-        caption = ", ".join(caption_parts[:5])  # Máximo 5 elementos
-        
-        return caption
+            
+        return ", ".join(top_labels)
 
     def process_batch(self, audio_files: List[str], output_dir: str, top_k: int = 8) -> str:
         """Procesar múltiples archivos de audio"""
