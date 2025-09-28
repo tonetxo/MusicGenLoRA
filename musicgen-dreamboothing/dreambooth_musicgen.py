@@ -659,6 +659,7 @@ def main():
         token=data_args.token,
         trust_remote_code=data_args.trust_remote_code,
         revision=model_args.model_revision,
+        attn_implementation="eager",
     )
     # take audio_encoder_feature_extractor
     audio_encoder_feature_extractor = AutoFeatureExtractor.from_pretrained(
@@ -702,6 +703,11 @@ def main():
                 sr=audio_encoder_feature_extractor.sampling_rate, 
                 mono=True
             )
+
+            # Normalizar el audio a un rango de [-1, 1]
+            if np.max(np.abs(audio_array)) > 0:
+                audio_array = audio_array / np.max(np.abs(audio_array))
+            
             
             # Truncar o rellenar el audio a la duración objetivo
             current_length = len(audio_array)

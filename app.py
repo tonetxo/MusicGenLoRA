@@ -335,10 +335,50 @@ def augment_dataset_simple(input_dataset_path: str, output_dataset_path: str) ->
         return f"❌ Error en augmentación: {str(e)}"
 
 # === ENTRENAMIENTO ===
+import signal
+
+current_training_process = None
+
+def interrupt_training():
+    global current_training_process
+    if current_training_process and current_training_process.poll() is None:
+        try:
+            os.killpg(os.getpgid(current_training_process.pid), signal.SIGTERM)
+            current_training_process = None
+            return "🛑 Entrenamiento interrumpido por el usuario."
+        except Exception as e:
+            return f"⚠️ Error al interrumpir: {str(e)}"
+    return "No hay ningún entrenamiento en curso para interrumpir."
+
 def modify_and_run_training(
-    dataset_path, output_dir, epochs, lr, lora_r, lora_alpha, max_duration, train_seed,
+    dataset_path, output_dir, epochs, lr, scheduler, lora_r, lora_alpha, max_duration, train_seed,
     use_augmented=False, augmented_path="", weight_decay=0.01
 ):
+    global current_training_process
+    if current_training_process and current_training_process.poll() is None:
+        yield "⚠️ Ya hay un entrenamiento en curso. Interrúmpelo antes de empezar uno nuevo."
+        return
+
+    # --- BORRADO MANUAL Y FORZADO DEL DIRECTORIO DE SALIDA ---
+    try:
+        output_dir_path = Path("./musicgen-dreamboothing") / output_dir
+        if output_dir_path.is_dir():
+            yield f"🗑️ Limpiando directorio de salida (conservando logs): {output_dir_path}"
+            for item in output_dir_path.iterdir():
+                if item.name == "runs":
+                    continue
+                if item.is_dir():
+                    shutil.rmtree(item)
+                else:
+                    os.remove(item)
+        else:
+            os.makedirs(output_dir_path, exist_ok=True)
+        yield f"✅ Directorio de salida limpio creado en: {output_dir_path}"
+    except Exception as e:
+        yield f"❌ Error al limpiar el directorio de salida: {e}"
+        return
+    # ----------------------------------------------------------
+
     dataset_path_to_use = augmented_path if use_augmented and augmented_path and os.path.exists(augmented_path) else dataset_path
     absolute_dataset_path = os.path.abspath(dataset_path_to_use)
     yield f"Usando dataset: {absolute_dataset_path}\n"
@@ -355,8 +395,9 @@ def modify_and_run_training(
         f"--lora_r={int(lora_r)}",
         f"--lora_alpha={int(lora_alpha)}",
         f"--learning_rate={lr}",
+        f"--lr_scheduler_type={scheduler}",
         "--per_device_train_batch_size=1",
-        "--gradient_accumulation_steps=4",  # 🔑 Reducido a 4
+        "--gradient_accumulation_steps=4",
         "--fp16",
         "--text_column_name=description",
         "--target_audio_column_name=audio_filepath",
@@ -374,7 +415,10 @@ def modify_and_run_training(
 
     full_log = "🚀 Iniciando entrenamiento...\n"
     yield full_log
-    process = subprocess.Popen(command, cwd="./musicgen-dreamboothing", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    
+    process = subprocess.Popen(command, cwd="./musicgen-dreamboothing", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
+    current_training_process = process
+    
     try:
         for line in iter(process.stdout.readline, ''):
             if line:
@@ -385,7 +429,9 @@ def modify_and_run_training(
         yield full_log
     finally:
         process.wait()
+        
     full_log += "\n✅ Entrenamiento finalizado." if process.returncode == 0 else f"\n❌ Error: {process.returncode}"
+    current_training_process = None
     yield full_log
 
 # === INFERENCIA ===
@@ -457,6 +503,9 @@ def generate_music_with_state(
     else:
         audio_np = audio_np[0] if audio_np.shape[0] > 1 else audio_np
 
+    # Convertir a int16 para evitar el warning de Gradio
+    audio_np = (audio_np * 32767).astype(np.int16)
+
     return current_state, "✅ Generado", (32000, audio_np)
 
 def save_generated_audio(audio_data, output_dir="./generated_audio"):
@@ -493,12 +542,14 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             output_dir_input = gr.Textbox(label="Carpeta LoRA", value=settings.get("output_dir", ""))
             epochs_input = gr.Slider(label="Épocas", minimum=1, maximum=100, step=1, value=settings.get("epochs", 15))
             lr_input = gr.Number(label="LR", value=settings.get("lr", 0.0001), precision=6)
+            scheduler_input = gr.Dropdown(label="LR Scheduler", choices=["linear", "cosine", "constant"], value="linear")
             weight_decay_input = gr.Slider(label="Weight Decay", minimum=0.0, maximum=0.2, step=0.01, value=0.01)
             max_duration_input = gr.Slider(label="Duración (s)", minimum=5, maximum=30, value=settings.get("max_duration", 8))
             r_input = gr.Slider(label="R", minimum=4, maximum=128, step=4, value=settings.get("lora_r", 8))
             alpha_input = gr.Slider(label="Alpha", minimum=4, maximum=256, step=4, value=settings.get("lora_alpha", 16))
             train_seed_input = gr.Number(label="Semilla", value=settings.get("train_seed", 42))
             launch_train_btn = gr.Button("🚀 Entrenar", variant="primary")
+            interrupt_train_btn = gr.Button("🛑 Interrumpir")
             train_log = gr.Textbox(label="Log", lines=15)
 
         with gr.TabItem("✍️ Gestor de Prompts"):
@@ -535,9 +586,10 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
     augment_dataset_btn.click(augment_dataset_simple, inputs=[prep_dataset_path_input, augmented_output_path], outputs=metadata_output)
     launch_train_btn.click(
         modify_and_run_training,
-        inputs=[prep_dataset_path_input, output_dir_input, epochs_input, lr_input, r_input, alpha_input, max_duration_input, train_seed_input, use_augmented_cb, augmented_output_path, weight_decay_input],
+        inputs=[prep_dataset_path_input, output_dir_input, epochs_input, lr_input, scheduler_input, r_input, alpha_input, max_duration_input, train_seed_input, use_augmented_cb, augmented_output_path, weight_decay_input],
         outputs=train_log
     )
+    interrupt_train_btn.click(interrupt_training, outputs=train_log)
     prompt_select_dd.change(lambda name: prompt_manager.get_prompt_text(name), inputs=prompt_select_dd, outputs=prompt_text_area)
     save_prompt_btn.click(lambda name, text: (prompt_manager.update_prompt(name, text), gr.Dropdown(choices=prompt_manager.get_prompt_names(), value=name)), inputs=[prompt_name_tb, prompt_text_area], outputs=[prompt_status_tb, prompt_select_dd])
     delete_prompt_btn.click(lambda name: (prompt_manager.delete_prompt(name), gr.Dropdown(choices=prompt_manager.get_prompt_names())), inputs=prompt_name_tb, outputs=[prompt_status_tb, prompt_select_dd])
