@@ -524,13 +524,29 @@ def save_generated_audio(audio_data, output_dir="./generated_audio"):
     except Exception as e:
         return f"❌ Error: {e}"
 
-import functools
-
-def update_setting(key, value):
-    # Cargar, actualizar y guardar para asegurar la persistencia
-    s = load_settings()
-    s[key] = value
-    save_settings(s)
+def save_all_settings(dataset_path, output_dir, epochs, lr, scheduler, weight_decay, max_duration, lora_r, lora_alpha, train_seed, inference_prompt, inference_duration, inference_seed, guidance, temp, topk, topp, ollama_model):
+    settings_to_save = {
+        "dataset_path": dataset_path,
+        "output_dir": output_dir,
+        "epochs": epochs,
+        "lr": lr,
+        "lr_scheduler": scheduler,
+        "weight_decay": weight_decay,
+        "max_duration": max_duration,
+        "lora_r": lora_r,
+        "lora_alpha": lora_alpha,
+        "train_seed": train_seed,
+        "inference_prompt": inference_prompt,
+        "inference_duration": inference_duration,
+        "inference_seed": inference_seed,
+        "guidance_scale": guidance,
+        "temperature": temp,
+        "top_k": topk,
+        "top_p": topp,
+        "ollama_model": ollama_model
+    }
+    save_settings(settings_to_save)
+    return "✅ Ajustes guardados en settings.json"
 
 # === GRADIO ===
 with gr.Blocks(theme=gr.themes.Soft()) as demo:
@@ -540,6 +556,10 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
 
     with gr.Tabs():
         with gr.TabItem("🛠️ Entrenar LoRA"):
+            save_settings_btn = gr.Button("💾 Guardar Todos los Ajustes")
+            settings_save_output = gr.Textbox(label="Estado de los Ajustes", interactive=False)
+            
+            gr.Markdown("### 1. Preparación de Datos")
             prep_dataset_path_input = gr.Textbox(label="Ruta audios", value=settings.get("dataset_path", ""))
             generate_metadata_button = gr.Button("🤖 Generar metadata.jsonl")
             metadata_output = gr.Textbox(label="Resultado", lines=2)
@@ -548,15 +568,18 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             use_augmented_cb = gr.Checkbox(label="Usar dataset augmentado", value=False)
             augment_dataset_btn = gr.Button("🔄 Augmentar Dataset")
 
+            gr.Markdown("### 2. Parámetros de Entrenamiento")
             output_dir_input = gr.Textbox(label="Carpeta LoRA", value=settings.get("output_dir", ""))
             epochs_input = gr.Slider(label="Épocas", minimum=1, maximum=100, step=1, value=settings.get("epochs", 15))
             lr_input = gr.Number(label="LR", value=settings.get("lr", 0.0001), precision=6)
-            scheduler_input = gr.Dropdown(label="LR Scheduler", choices=["linear", "cosine", "constant"], value="linear")
-            weight_decay_input = gr.Slider(label="Weight Decay", minimum=0.0, maximum=0.2, step=0.01, value=0.01)
+            scheduler_input = gr.Dropdown(label="LR Scheduler", choices=["linear", "cosine", "constant"], value=settings.get("lr_scheduler", "linear"))
+            weight_decay_input = gr.Slider(label="Weight Decay", minimum=0.0, maximum=0.2, step=0.01, value=settings.get("weight_decay", 0.01))
             max_duration_input = gr.Slider(label="Duración (s)", minimum=5, maximum=40, value=settings.get("max_duration", 8))
             r_input = gr.Slider(label="R", minimum=4, maximum=128, step=4, value=settings.get("lora_r", 8))
             alpha_input = gr.Slider(label="Alpha", minimum=4, maximum=256, step=4, value=settings.get("lora_alpha", 16))
             train_seed_input = gr.Number(label="Semilla", value=settings.get("train_seed", 42))
+            
+            gr.Markdown("### 3. Iniciar")
             launch_train_btn = gr.Button("🚀 Entrenar", variant="primary")
             interrupt_train_btn = gr.Button("🛑 Interrumpir")
             train_log = gr.Textbox(label="Log", lines=15)
@@ -590,12 +613,24 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             save_audio_btn = gr.Button("💾 Guardar")
             save_output = gr.Textbox(label="Guardado")
 
-    # Eventos
+    # --- Eventos ---
+    all_settings_comps = [
+        prep_dataset_path_input, output_dir_input, epochs_input, lr_input, scheduler_input, 
+        weight_decay_input, max_duration_input, r_input, alpha_input, train_seed_input,
+        prompt_input, duration_slider, inference_seed_input, guidance_slider, 
+        temperature_slider, topk_slider, topp_slider, ollama_model_dd
+    ]
+    save_settings_btn.click(save_all_settings, inputs=all_settings_comps, outputs=settings_save_output)
+
     generate_metadata_button.click(generate_metadata, inputs=prep_dataset_path_input, outputs=metadata_output)
     augment_dataset_btn.click(augment_dataset_simple, inputs=[prep_dataset_path_input, augmented_output_path], outputs=metadata_output)
     launch_train_btn.click(
         modify_and_run_training,
-        inputs=[prep_dataset_path_input, output_dir_input, epochs_input, lr_input, scheduler_input, r_input, alpha_input, max_duration_input, train_seed_input, use_augmented_cb, augmented_output_path, weight_decay_input],
+        inputs=[
+            prep_dataset_path_input, output_dir_input, epochs_input, lr_input, scheduler_input, 
+            r_input, alpha_input, max_duration_input, train_seed_input, use_augmented_cb, 
+            augmented_output_path, weight_decay_input
+        ],
         outputs=train_log
     )
     interrupt_train_btn.click(interrupt_training, outputs=train_log)
@@ -612,20 +647,6 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
         outputs=[active_model_state, status_output, audio_out]
     )
     save_audio_btn.click(save_generated_audio, inputs=audio_out, outputs=save_output)
-
-    # Bucle para guardar ajustes
-    all_settings_inputs = {
-        prep_dataset_path_input: "dataset_path", output_dir_input: "output_dir",
-        epochs_input: "epochs", lr_input: "lr", scheduler_input: "lr_scheduler", 
-        weight_decay_input: "weight_decay", max_duration_input: "max_duration",
-        r_input: "lora_r", alpha_input: "lora_alpha", train_seed_input: "train_seed",
-        prompt_input: "inference_prompt", duration_slider: "inference_duration",
-        inference_seed_input: "inference_seed", guidance_slider: "guidance_scale",
-        temperature_slider: "temperature", topk_slider: "top_k", topp_slider: "top_p",
-        ollama_model_dd: "ollama_model"
-    }
-    for comp, key in all_settings_inputs.items():
-        comp.change(functools.partial(update_setting, key), inputs=comp, outputs=None)
 
 if __name__ == "__main__":
     demo.launch()
