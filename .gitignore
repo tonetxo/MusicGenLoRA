@@ -7,7 +7,7 @@ __pycache__/
 /generated_audio/
 
 # Directorios de entrenamiento y logs
-/mi_lora_final/
+/musicgen-dreamboothing/mi_lora_final/
 /musicgen-dreamboothing/lora_*/
 /musicgen-dreamboothing/wandb/
 /musicgen-dreamboothing/checkpoint-*/

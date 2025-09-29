@@ -75,27 +75,61 @@ class AudioTagger:
     def process_audio_file(self, audio_path: str, top_k: int = 10) -> Dict[str, Any]:
         """Procesar audio con el modelo disponible o usar etiquetas por defecto"""
         try:
-            # Cargar audio básico
             audio, sr = librosa.load(audio_path, sr=16000, mono=True)
             duration = len(audio) / sr
-            
-            # Si no hay modelo, generar etiquetas básicas
+
             if not self.model or not self.processor:
                 return self._generate_default_tags(audio_path, audio, sr, duration)
-            
-            # Segmentar si es muy largo
-            if duration > 10.0:
-                start_sample = int((duration - 10.0) / 2 * sr)
-                audio = audio[start_sample:start_sample + int(10.0 * sr)]
-                logger.info(f"Segmentado audio a 10 segundos desde {start_sample/sr:.1f}s")
-            
-            # Procesamiento específico por tipo de modelo
-            if self.model_type == "ast":
-                return self._process_with_ast(audio_path, audio, sr, duration, top_k)
-            elif self.model_type == "wav2vec2":
-                return self._process_with_wav2vec2(audio_path, audio, sr, duration, top_k)
+
+            # --- NUEVA LÓGICA DE CHUNKING ---
+            if duration <= 10.0:
+                chunks = [audio]
+                logger.info(f"Procesando audio completo ({duration:.1f}s)")
             else:
-                return self._process_with_generic(audio_path, audio, sr, duration, top_k)
+                logger.info(f"Audio largo detectado ({duration:.1f}s). Segmentando en trozos de 10s...")
+                chunk_len_s = 10.0
+                overlap_s = 5.0  # Solapamiento para no perder contexto en los bordes
+                chunks = []
+                for start_s in np.arange(0, duration - chunk_len_s, chunk_len_s - overlap_s):
+                    start_sample = int(start_s * sr)
+                    end_sample = start_sample + int(chunk_len_s * sr)
+                    chunks.append(audio[start_sample:end_sample])
+                # Asegurarse de que el último trozo se procesa
+                chunks.append(audio[int(duration - chunk_len_s) * sr:])
+
+            all_labels = {}
+            model_used = ""
+
+            for i, chunk in enumerate(chunks):
+                # Llamar a la función de procesamiento específica del modelo
+                if self.model_type == "ast":
+                    result = self._process_with_ast(audio_path, chunk, sr, duration, top_k)
+                elif self.model_type == "wav2vec2":
+                    result = self._process_with_wav2vec2(audio_path, chunk, sr, duration, top_k)
+                else:
+                    result = self._process_with_generic(audio_path, chunk, sr, duration, top_k)
+
+                model_used = result.get("model_used", "unknown")
+                
+                # Agregar y actualizar confianzas de las etiquetas
+                for label_info in result.get("labels", []):
+                    key = label_info["cleaned_label"]
+                    if key and (key not in all_labels or label_info["confidence"] > all_labels[key]["confidence"]):
+                        all_labels[key] = label_info
+            
+            # Convertir el diccionario de etiquetas de nuevo a una lista y ordenar por confianza
+            final_labels = sorted(list(all_labels.values()), key=lambda x: x["confidence"], reverse=True)
+            
+            caption = self.generate_caption(final_labels)
+
+            return {
+                "caption": caption,
+                "labels": final_labels,
+                "file_path": audio_path,
+                "duration": duration,
+                "model_used": model_used + " (chunked)"
+            }
+            # --- FIN DE LA NUEVA LÓGICA ---
             
         except Exception as e:
             logger.error(f"Error procesando {audio_path}: {str(e)}")
@@ -106,15 +140,10 @@ class AudioTagger:
         try:
             # Análisis básico con librosa
             tempo, _ = librosa.beat.beat_track(y=audio, sr=sr)
+            avg_tempo = float(tempo[0]) if isinstance(tempo, np.ndarray) and tempo.size > 0 else float(tempo)
+
             chroma = librosa.feature.chroma_stft(y=audio, sr=sr)
             spectral_centroids = librosa.feature.spectral_centroid(y=audio, sr=sr)
-            spectral_rolloff = librosa.feature.spectral_rolloff(y=audio, sr=sr)
-            mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=13)
-            
-            # Determinar características básicas
-            avg_tempo = float(tempo)
-            avg_spectral_centroid = float(np.mean(spectral_centroids))
-            avg_rolloff = float(np.mean(spectral_rolloff))
             
             # Generar etiquetas basadas en análisis
             labels = []
@@ -128,7 +157,7 @@ class AudioTagger:
                 labels.append({"label": "fast tempo", "cleaned_label": "upbeat", "confidence": 0.7, "rank": 1})
             
             # Características espectrales
-            if avg_spectral_centroid > 3000:
+            if np.mean(spectral_centroids) > 3000:
                 labels.append({"label": "bright", "cleaned_label": "bright", "confidence": 0.6, "rank": 2})
             else:
                 labels.append({"label": "warm", "cleaned_label": "warm", "confidence": 0.6, "rank": 2})

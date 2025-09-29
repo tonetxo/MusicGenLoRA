@@ -271,18 +271,29 @@ def augment_dataset_simple(input_dataset_path: str, output_dataset_path: str) ->
         return f"❌ Error creando directorio de salida: {e}"
     def simple_augment_audio(y, sr, filename_prefix):
         augmented_samples = []
+        # 1. Pitch Shift
         try:
-            y_pitch_down = librosa.effects.pitch_shift(y, sr=sr, n_steps=-1)
-            augmented_samples.append((y_pitch_down, sr, f"{filename_prefix}_pitch_down1"))
+            augmented_samples.append((librosa.effects.pitch_shift(y, sr=sr, n_steps=-1), sr, f"{filename_prefix}_pitch_down1"))
+            augmented_samples.append((librosa.effects.pitch_shift(y, sr=sr, n_steps=1), sr, f"{filename_prefix}_pitch_up1"))
         except: pass
+        
+        # 2. Volume Change
+        augmented_samples.append((np.clip(y * 0.9, -1.0, 1.0), sr, f"{filename_prefix}_vol_down"))
+        augmented_samples.append((np.clip(y * 1.1, -1.0, 1.0), sr, f"{filename_prefix}_vol_up"))
+
+        # 3. Time Stretch (Nuevo)
         try:
-            y_pitch_up = librosa.effects.pitch_shift(y, sr=sr, n_steps=1)
-            augmented_samples.append((y_pitch_up, sr, f"{filename_prefix}_pitch_up1"))
+            augmented_samples.append((librosa.effects.time_stretch(y, rate=0.9), sr, f"{filename_prefix}_stretch_slow"))
+            augmented_samples.append((librosa.effects.time_stretch(y, rate=1.1), sr, f"{filename_prefix}_stretch_fast"))
         except: pass
-        y_vol_down = np.clip(y * 0.9, -1.0, 1.0)
-        augmented_samples.append((y_vol_down, sr, f"{filename_prefix}_vol_down"))
-        y_vol_up = np.clip(y * 1.1, -1.0, 1.0)
-        augmented_samples.append((y_vol_up, sr, f"{filename_prefix}_vol_up"))
+
+        # 4. Add Noise (Nuevo)
+        try:
+            noise = np.random.randn(len(y))
+            y_noise = y + 0.005 * noise
+            augmented_samples.append((np.clip(y_noise, -1.0, 1.0), sr, f"{filename_prefix}_noise"))
+        except: pass
+            
         return augmented_samples
     total_samples = 0
     new_metadata_path = output_path / "metadata.jsonl"
@@ -324,7 +335,7 @@ def augment_dataset_simple(input_dataset_path: str, output_dataset_path: str) ->
                         new_data['title'] = f"{data['title']} ({aug_name.split('_')[-1]})"
                         new_data['file_name'] = new_audio_filename
                         new_data['audio_filepath'] = str(new_audio_path_obj.resolve())
-                        new_data['description'] = f"{data['description']} (augmented)"
+                        new_data['description'] = data['description']
                         f_out.write(json.dumps(new_data, ensure_ascii=False) + '\n')
                         total_samples += 1
                 except Exception as e:

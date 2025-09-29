@@ -1,20 +1,20 @@
 {
-    "dataset_path": "",
+    "dataset_path": "/mnt/datos/ModeloAudio/training_data",
     "output_dir": "./mi_lora_final",
     "epochs": 15,
-    "lr": 0.0001,
-    "lora_r": 8,
-    "lora_alpha": 16,
-    "max_duration": 8,
-    "ollama_model": "",
+    "lr": 0.0007,
+    "lr_scheduler": "cosine",
+    "weight_decay": 0.01,
+    "max_duration": 30,
+    "lora_r": 16,
+    "lora_alpha": 32,
     "train_seed": 42,
     "inference_prompt": "tonetxo_style, synthwave",
     "inference_duration": 8,
-    "lora_path": "",
-    "inference_seed": 1,
-    "guidance_scale": 3.0,
+    "inference_seed": -1,
+    "guidance_scale": 3,
     "temperature": 1,
     "top_k": 250,
-    "top_p": 0.0
-}
+    "top_p": 0,
+    "ollama_model": "redule26/huihui_ai_qwen2.5-vl-7b-abliterated:latest"
 }
