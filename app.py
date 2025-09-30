@@ -22,7 +22,6 @@ from captioning import AudioTagger
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-
 SETTINGS_FILE = "settings.json"
 MODEL_ID = "facebook/musicgen-small"
 
@@ -35,7 +34,7 @@ def load_settings():
         "lr": 0.0001,
         "lora_r": 8,
         "lora_alpha": 16,
-        "max_duration": 8,  # 🔑 Clave para evitar OOM
+        "max_duration": 8,
         "ollama_model": "",
         "train_seed": 42,
         "inference_prompt": "tonetxo_style, synthwave",
@@ -132,7 +131,6 @@ class OllamaIntegration:
             return out[0].upper() + out[1:] if out else base_prompt
         except: return "Error en Ollama"
     def unload_ollama_model(self, model_name):
-        """Descarga un modelo específico de Ollama de la memoria."""
         try:
             result = subprocess.run(
                 ["ollama", "stop", model_name],
@@ -140,24 +138,20 @@ class OllamaIntegration:
                 text=True,
                 check=False,
             )
-            
             if result.returncode == 0:
                 return f"✅ Modelo Ollama '{model_name}' descargado de la memoria."
             else:
                 return f"⚠️ No se pudo descargar el modelo '{model_name}': {result.stderr}"
-                
         except FileNotFoundError:
             return "❌ Comando 'ollama' no encontrado."
         except Exception as e:
             return f"⚠️ Error al descargar modelo Ollama: {str(e)}"
 
 def free_gpu_memory():
-    """Libera la memoria GPU utilizada por el modelo de MusicGen"""
     global base_model
     try:
         if base_model is not None:
             base_model.to("cpu")
-        
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             return "✅ Memoria GPU liberada correctamente."
@@ -181,44 +175,30 @@ try:
 except: pass
 
 def _extract_description(raw, audio_path=None):
-    """Extraer descripción mejorada con PANNs"""
     result = {
         "description": "electronic music, synth, drums", 
         "bpm": "", 
         "genre": "electronic", 
         "moods": []
     }
-    
     desc = ""
-    
-    # Manejar diferentes formatos de respuesta de PANNs
     if isinstance(raw, dict):
         if "caption" in raw and raw["caption"]:
             desc = raw["caption"]
         elif "labels" in raw and raw["labels"]:
-            # Usar las etiquetas limpiadas de PANNs
             labels = raw["labels"]
             if labels:
-                # Tomar las 3-4 etiquetas principales
                 main_labels = [label.get("cleaned_label", label["label"]) 
                              for label in labels[:4] if label.get("confidence", 0) > 0.1]
                 if main_labels:
                     desc = ", ".join(main_labels)
-    
     elif isinstance(raw, str):
         desc = raw
-    
-    # Mejorar la descripción base si es genérica
     if not desc or desc == "audio caption placeholder":
         desc = "electronic music, synth, drums"
-    
-    # Asegurar que tenga el estilo Tonetxo
     if "tonetxo_style" not in desc.lower():
         desc = f"tonetxo_style, {desc}"
-    
     result["description"] = desc
-    
-    # Calcular BPM si hay archivo de audio
     if audio_path and os.path.exists(audio_path):
         try:
             y, sr = librosa.load(audio_path, sr=None, mono=True)
@@ -226,9 +206,8 @@ def _extract_description(raw, audio_path=None):
             result["bpm"] = str(round(float(tempo))) if tempo > 0 else ""
         except Exception as e:
             logger.warning(f"No se pudo calcular BPM para {audio_path}: {e}")
-    
     return result
-    
+
 def generate_metadata(dataset_dir):
     if not tagger_loaded: return "❌ AudioTagger no disponible"
     root = Path(dataset_dir)
@@ -288,29 +267,21 @@ def augment_dataset_simple(input_dataset_path: str, output_dataset_path: str) ->
         return f"❌ Error creando directorio de salida: {e}"
     def simple_augment_audio(y, sr, filename_prefix):
         augmented_samples = []
-        # 1. Pitch Shift
         try:
             augmented_samples.append((librosa.effects.pitch_shift(y, sr=sr, n_steps=-1), sr, f"{filename_prefix}_pitch_down1"))
             augmented_samples.append((librosa.effects.pitch_shift(y, sr=sr, n_steps=1), sr, f"{filename_prefix}_pitch_up1"))
         except: pass
-        
-        # 2. Volume Change
         augmented_samples.append((np.clip(y * 0.9, -1.0, 1.0), sr, f"{filename_prefix}_vol_down"))
         augmented_samples.append((np.clip(y * 1.1, -1.0, 1.0), sr, f"{filename_prefix}_vol_up"))
-
-        # 3. Time Stretch (Nuevo)
         try:
             augmented_samples.append((librosa.effects.time_stretch(y, rate=0.9), sr, f"{filename_prefix}_stretch_slow"))
             augmented_samples.append((librosa.effects.time_stretch(y, rate=1.1), sr, f"{filename_prefix}_stretch_fast"))
         except: pass
-
-        # 4. Add Noise (Nuevo)
         try:
             noise = np.random.randn(len(y))
             y_noise = y + 0.005 * noise
             augmented_samples.append((np.clip(y_noise, -1.0, 1.0), sr, f"{filename_prefix}_noise"))
         except: pass
-            
         return augmented_samples
     total_samples = 0
     new_metadata_path = output_path / "metadata.jsonl"
@@ -364,9 +335,7 @@ def augment_dataset_simple(input_dataset_path: str, output_dataset_path: str) ->
 
 # === ENTRENAMIENTO ===
 import signal
-
 current_training_process = None
-
 def interrupt_training():
     global current_training_process
     if current_training_process and current_training_process.poll() is None:
@@ -386,8 +355,6 @@ def modify_and_run_training(
     if current_training_process and current_training_process.poll() is None:
         yield "⚠️ Ya hay un entrenamiento en curso. Interrúmpelo antes de empezar uno nuevo."
         return
-
-    # --- BORRADO MANUAL Y FORZADO DEL DIRECTORIO DE SALIDA ---
     try:
         output_dir_path = Path("./musicgen-dreamboothing") / output_dir
         if output_dir_path.is_dir():
@@ -405,14 +372,10 @@ def modify_and_run_training(
     except Exception as e:
         yield f"❌ Error al limpiar el directorio de salida: {e}"
         return
-    # ----------------------------------------------------------
-
     dataset_path_to_use = augmented_path if use_augmented and augmented_path and os.path.exists(augmented_path) else dataset_path
     absolute_dataset_path = os.path.abspath(dataset_path_to_use)
     yield f"Usando dataset: {absolute_dataset_path}\n"
-
     yield "✅ Script de entrenamiento verificado.\n"
-
     command = [
         "accelerate", "launch", "dreambooth_musicgen.py",
         f"--model_name_or_path={MODEL_ID}",
@@ -441,13 +404,10 @@ def modify_and_run_training(
         f"--weight_decay={weight_decay}",
         "--gradient_checkpointing",
     ]
-
     full_log = "🚀 Iniciando entrenamiento...\n"
     yield full_log
-    
     process = subprocess.Popen(command, cwd="./musicgen-dreamboothing", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
     current_training_process = process
-    
     try:
         for line in iter(process.stdout.readline, ''):
             if line:
@@ -458,7 +418,6 @@ def modify_and_run_training(
         yield full_log
     finally:
         process.wait()
-        
     full_log += "\n✅ Entrenamiento finalizado." if process.returncode == 0 else f"\n❌ Error: {process.returncode}"
     current_training_process = None
     yield full_log
@@ -470,13 +429,11 @@ def switch_model_and_state(lora_files: List[str]):
         base_model.to("cpu")
         torch.cuda.empty_cache()
     except: pass
-
     if not lora_files or all(f is None for f in lora_files):
         del base_model
         torch.cuda.empty_cache()
         base_model = MusicgenForConditionalGeneration.from_pretrained(MODEL_ID, torch_dtype=torch.float16)
         return {"model": base_model, "lora_path": None}, "✅ Modelo Base"
-
     try:
         import tempfile, shutil
         lora_temp_dir = tempfile.mkdtemp()
@@ -496,20 +453,16 @@ def generate_music_with_state(
     active_model = current_state["model"]
     want_base = not lora_path_from_file_input or all(f is None for f in lora_path_from_file_input)
     has_lora = current_state["lora_path"] is not None
-
     if (want_base and has_lora) or (not want_base and not has_lora):
         new_state, _ = switch_model_and_state(lora_path_from_file_input)
         active_model = new_state["model"]
         current_state = new_state
-
     active_model = active_model.to("cuda")
     if seed != -1:
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
-
     inputs = processor(text=[prompt], return_tensors="pt").to("cuda")
     max_tokens = min(int(duration * 50), 2048)
-
     with torch.no_grad():
         audio_codes = active_model.generate(
             **inputs,
@@ -520,10 +473,8 @@ def generate_music_with_state(
             top_k=topk if topk > 0 else 250,
             top_p=topp if topp > 0 else None,
         )
-
     active_model = active_model.to("cpu")
     torch.cuda.empty_cache()
-
     audio_np = audio_codes[0].cpu().numpy()
     if audio_np.ndim == 2 and audio_np.shape[0] <= 2:
         audio_np = audio_np.T
@@ -531,10 +482,7 @@ def generate_music_with_state(
         pass
     else:
         audio_np = audio_np[0] if audio_np.shape[0] > 1 else audio_np
-
-    # Convertir a int16 para evitar el warning de Gradio
     audio_np = (audio_np * 32767).astype(np.int16)
-
     return current_state, "✅ Generado", (32000, audio_np)
 
 def save_generated_audio(audio_data, output_dir="./generated_audio"):
@@ -578,24 +526,25 @@ def save_all_settings(dataset_path, output_dir, epochs, lr, scheduler, weight_de
 
 # === GRADIO ===
 with gr.Blocks(theme=gr.themes.Soft()) as demo:
-    gr.Markdown("# 🎶 MusicGen DreamBooth – v4.6 (corregido)")
+    gr.Markdown("# 🎶 MusicGen DreamBooth – v4.8 (Parámetros Dinámicos)")
     initial_state = {"model": base_model, "lora_path": None}
     active_model_state = gr.State(value=initial_state)
+    continuous_generation_state = gr.State(value={'is_running': False})
+
+    # Timer declarado aquí (dentro de Blocks)
+    timer = gr.Timer(10)
 
     with gr.Tabs():
         with gr.TabItem("🛠️ Entrenar LoRA"):
             save_settings_btn = gr.Button("💾 Guardar Todos los Ajustes")
             settings_save_output = gr.Textbox(label="Estado de los Ajustes", interactive=False)
-            
             gr.Markdown("### 1. Preparación de Datos")
             prep_dataset_path_input = gr.Textbox(label="Ruta audios", value=settings.get("dataset_path", ""))
             generate_metadata_button = gr.Button("🤖 Generar metadata.jsonl")
             metadata_output = gr.Textbox(label="Resultado", lines=2)
-            
             augmented_output_path = gr.Textbox(label="Ruta salida augmentado", value="./augmented_training_data")
             use_augmented_cb = gr.Checkbox(label="Usar dataset augmentado", value=False)
             augment_dataset_btn = gr.Button("🔄 Augmentar Dataset")
-
             gr.Markdown("### 2. Parámetros de Entrenamiento")
             output_dir_input = gr.Textbox(label="Carpeta LoRA", value=settings.get("output_dir", ""))
             epochs_input = gr.Slider(label="Épocas", minimum=1, maximum=100, step=1, value=settings.get("epochs", 15))
@@ -606,7 +555,6 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             r_input = gr.Slider(label="R", minimum=4, maximum=128, step=4, value=settings.get("lora_r", 8))
             alpha_input = gr.Slider(label="Alpha", minimum=4, maximum=256, step=4, value=settings.get("lora_alpha", 16))
             train_seed_input = gr.Number(label="Semilla", value=settings.get("train_seed", 42))
-            
             gr.Markdown("### 3. Iniciar")
             launch_train_btn = gr.Button("🚀 Entrenar", variant="primary")
             interrupt_train_btn = gr.Button("🛑 Interrumpir")
@@ -627,20 +575,32 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             use_in_inference_btn = gr.Button("🎵 Usar en Generador")
 
         with gr.TabItem("🎵 Generador"):
-            prompt_input = gr.Textbox(label="Prompt", value=settings.get("inference_prompt", "tonetxo_style, synthwave"))
-            lora_path_input = gr.File(label="Arrastra LoRA", file_count="multiple")
-            inference_seed_input = gr.Number(label="Semilla", value=settings.get("inference_seed", -1))
-            generate_btn = gr.Button("🎹 Generar", variant="primary")
+            with gr.Row():
+                prompt_input = gr.Textbox(label="Prompt", value=settings.get("inference_prompt", "tonetxo_style, synthwave"), show_copy_button=True)
+                lora_path_input = gr.File(label="Arrastra LoRA", file_count="multiple")
+            with gr.Row():
+                inference_seed_input = gr.Number(label="Semilla", value=settings.get("inference_seed", -1))
+                duration_slider = gr.Slider(label="Duración (s)", minimum=5, maximum=40, value=settings.get("inference_duration", 8))
+            with gr.Row():
+                generate_btn = gr.Button("🎹 Generar", variant="primary")
+                continuous_generate_btn = gr.Button("🔄 Generación Continua", variant="secondary")
+                stop_generate_btn = gr.Button("🛑 Detener", variant="stop")
+            
+            # 👇 Campo de intervalo AÑADIDO aquí
+            interval_input = gr.Number(label=".Intervalo entre generaciones (segundos)", value=10, minimum=1, step=1)
+
             status_output = gr.Textbox(label="Estado", value="✅ Modelo Base")
-            duration_slider = gr.Slider(label="Duración (s)", minimum=5, maximum=40, value=settings.get("inference_duration", 8))
-            with gr.Accordion("Ajustes avanzados", open=False):
-                guidance_slider = gr.Slider(label="CFG", minimum=1, maximum=20, value=settings.get("guidance_scale", 3.0))
-                temperature_slider = gr.Slider(label="Temp", minimum=0.1, maximum=2.0, value=settings.get("temperature", 1.0))
-                topk_slider = gr.Slider(label="Top-k", minimum=0, maximum=500, value=settings.get("top_k", 250))
-                topp_slider = gr.Slider(label="Top-p", minimum=0.0, maximum=1.0, value=settings.get("top_p", 0.0))
-            audio_out = gr.Audio(label="Audio", type="numpy")
-            save_audio_btn = gr.Button("💾 Guardar")
-            save_output = gr.Textbox(label="Guardado")
+            with gr.Accordion("🎛️ Parámetros de Generación (Modificables en tiempo real)", open=True):
+                with gr.Row():
+                    guidance_slider = gr.Slider(label="CFG Scale", minimum=1, maximum=20, value=settings.get("guidance_scale", 3.0), step=0.1)
+                    temperature_slider = gr.Slider(label="Temperature", minimum=0.1, maximum=2.0, value=settings.get("temperature", 1.0), step=0.1)
+                with gr.Row():
+                    topk_slider = gr.Slider(label="Top-k", minimum=0, maximum=500, value=settings.get("top_k", 250), step=1)
+                    topp_slider = gr.Slider(label="Top-p", minimum=0.0, maximum=1.0, value=settings.get("top_p", 0.0), step=0.01)
+            audio_out = gr.Audio(label="Audio Generado", type="numpy")
+            with gr.Row():
+                save_audio_btn = gr.Button("💾 Guardar Audio")
+                save_output = gr.Textbox(label="Estado Guardado", interactive=False)
 
     # --- Eventos ---
     all_settings_comps = [
@@ -650,7 +610,6 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
         temperature_slider, topk_slider, topp_slider, ollama_model_dd
     ]
     save_settings_btn.click(save_all_settings, inputs=all_settings_comps, outputs=settings_save_output)
-
     generate_metadata_button.click(generate_metadata, inputs=prep_dataset_path_input, outputs=metadata_output)
     augment_dataset_btn.click(augment_dataset_simple, inputs=[prep_dataset_path_input, augmented_output_path], outputs=metadata_output)
     launch_train_btn.click(
@@ -671,12 +630,100 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
     free_gpu_btn.click(free_gpu_memory, outputs=prompt_status_tb)
     use_in_inference_btn.click(lambda txt: txt, inputs=prompt_text_area, outputs=prompt_input)
     lora_path_input.change(switch_model_and_state, inputs=lora_path_input, outputs=[active_model_state, status_output])
+
+    # --- Eventos de Generación ---
+    # Generación única
     generate_btn.click(
         generate_music_with_state,
         inputs=[active_model_state, lora_path_input, prompt_input, duration_slider, inference_seed_input, guidance_slider, temperature_slider, topk_slider, topp_slider],
         outputs=[active_model_state, status_output, audio_out]
+    ).then(
+        lambda audio_data: save_generated_audio(audio_data) if audio_data else "❌ No hay audio para guardar",
+        inputs=[audio_out],
+        outputs=[save_output]
     )
-    save_audio_btn.click(save_generated_audio, inputs=audio_out, outputs=save_output)
+
+    # === NUEVO: GENERACIÓN CONTINUA CON TIMER ===
+    def start_continuous_timer(state):
+        state["is_running"] = True
+        return state, "🔄 Generación continua iniciada..."
+
+    def stop_continuous_timer(state):
+        state["is_running"] = False
+        return state, "🛑 Generación continua detenida"
+
+    def timer_step(
+        continuous_state,
+        model_state,
+        lora_files,
+        prompt,
+        duration,
+        seed,
+        guidance,
+        temp,
+        topk,
+        topp,
+    ):
+        if not continuous_state.get("is_running", False):
+            return continuous_state, model_state, "⏹️ Pausado", None
+        try:
+            new_state, status, audio = generate_music_with_state(
+                model_state, lora_files, prompt, duration, seed, guidance, temp, topk, topp
+            )
+            if audio is not None:
+                save_result = save_generated_audio(audio)
+                status = f"🔄 Generado | {save_result}"
+            return continuous_state, new_state, status, audio
+        except Exception as e:
+            logger.error(f"Error en generación continua: {e}")
+            return continuous_state, model_state, f"❌ Error: {str(e)}", None
+
+    # Actualizar el timer cuando cambie el intervalo
+    interval_input.change(
+        lambda x: gr.Timer(active=False) if x <= 0 else gr.Timer(x),
+        inputs=interval_input,
+        outputs=timer
+    )
+
+    continuous_generate_btn.click(
+        start_continuous_timer,
+        inputs=[continuous_generation_state],
+        outputs=[continuous_generation_state, status_output]
+    )
+
+    stop_generate_btn.click(
+        stop_continuous_timer,
+        inputs=[continuous_generation_state],
+        outputs=[continuous_generation_state, status_output]
+    )
+
+    timer.tick(
+        timer_step,
+        inputs=[
+            continuous_generation_state,
+            active_model_state,
+            lora_path_input,
+            prompt_input,
+            duration_slider,
+            inference_seed_input,
+            guidance_slider,
+            temperature_slider,
+            topk_slider,
+            topp_slider,
+        ],
+        outputs=[
+            continuous_generation_state,
+            active_model_state,
+            status_output,
+            audio_out,
+        ]
+    )
+
+    save_audio_btn.click(
+        save_generated_audio,
+        inputs=[audio_out],
+        outputs=[save_output]
+    )
 
 if __name__ == "__main__":
     demo.launch()
