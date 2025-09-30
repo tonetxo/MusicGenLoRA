@@ -131,23 +131,40 @@ class OllamaIntegration:
             out = r.json().get("response", "").strip().replace('"', "")
             return out[0].upper() + out[1:] if out else base_prompt
         except: return "Error en Ollama"
-    def unload_ollama_model(self):
-        """Detiene el servidor de Ollama y libera memoria."""
+    def unload_ollama_model(self, model_name):
+        """Descarga un modelo específico de Ollama de la memoria."""
         try:
             result = subprocess.run(
-                ["ollama", "stop"],
+                ["ollama", "stop", model_name],
                 capture_output=True,
                 text=True,
                 check=False,
             )
+            
             if result.returncode == 0:
-                return "✅ Ollama detenido. Memoria liberada."
+                return f"✅ Modelo Ollama '{model_name}' descargado de la memoria."
             else:
-                return "⚠️ Ollama ya estaba detenido."
+                return f"⚠️ No se pudo descargar el modelo '{model_name}': {result.stderr}"
+                
         except FileNotFoundError:
             return "❌ Comando 'ollama' no encontrado."
         except Exception as e:
-            return f"⚠️ Error al detener Ollama: {str(e)}"
+            return f"⚠️ Error al descargar modelo Ollama: {str(e)}"
+
+def free_gpu_memory():
+    """Libera la memoria GPU utilizada por el modelo de MusicGen"""
+    global base_model
+    try:
+        if base_model is not None:
+            base_model.to("cpu")
+        
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            return "✅ Memoria GPU liberada correctamente."
+        else:
+            return "ℹ️ No hay GPU activa para liberar."
+    except Exception as e:
+        return f"❌ Error liberando memoria GPU: {str(e)}"
 
 prompt_manager = PromptManager()
 ollama = OllamaIntegration()
@@ -604,6 +621,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             prompt_text_area = gr.Textbox(label="Texto del Prompt", lines=5)
             ollama_model_dd = gr.Dropdown(label="Modelo Ollama", choices=available_ollama_models, value=settings.get("ollama_model", ""))
             unload_ollama_btn = gr.Button("🗑️ Descargar modelo")
+            free_gpu_btn = gr.Button("🧹 Liberar Memoria GPU")
             use_captions_cb = gr.Checkbox(label="Usar captions del dataset como contexto")
             enhance_btn = gr.Button("🔧 Mejorar con Ollama", variant="primary")
             use_in_inference_btn = gr.Button("🎵 Usar en Generador")
@@ -649,7 +667,8 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
     save_prompt_btn.click(lambda name, text: (prompt_manager.update_prompt(name, text), gr.Dropdown(choices=prompt_manager.get_prompt_names(), value=name)), inputs=[prompt_name_tb, prompt_text_area], outputs=[prompt_status_tb, prompt_select_dd])
     delete_prompt_btn.click(lambda name: (prompt_manager.delete_prompt(name), gr.Dropdown(choices=prompt_manager.get_prompt_names())), inputs=prompt_name_tb, outputs=[prompt_status_tb, prompt_select_dd])
     enhance_btn.click(ollama.enhance_and_translate_prompt, inputs=[ollama_model_dd, prompt_text_area, use_captions_cb, prep_dataset_path_input], outputs=prompt_text_area)
-    unload_ollama_btn.click(ollama.unload_ollama_model, inputs=[], outputs=prompt_status_tb)
+    unload_ollama_btn.click(ollama.unload_ollama_model, inputs=[ollama_model_dd], outputs=prompt_status_tb)
+    free_gpu_btn.click(free_gpu_memory, outputs=prompt_status_tb)
     use_in_inference_btn.click(lambda txt: txt, inputs=prompt_text_area, outputs=prompt_input)
     lora_path_input.change(switch_model_and_state, inputs=lora_path_input, outputs=[active_model_state, status_output])
     generate_btn.click(
