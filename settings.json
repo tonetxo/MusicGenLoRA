@@ -1,5 +1,5 @@
 {
-    "dataset_path": "/mnt/datos/ModeloAudio/training_data",
+    "dataset_path": "/mnt/datos/ModeloAudio/musicas",
     "output_dir": "./mi_lora_final",
     "epochs": 15,
     "lr": 0.0007,

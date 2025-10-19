@@ -127,19 +127,19 @@ class OllamaPromptManager:
         default_templates = [
             {
                 "name": "Predeterminado",
-                "template": "You are an expert music-prompt writer. Always ensure 'tonetxo_style' is included in the generated prompt. Improve and translate to English for MusicGen: \\\"{prompt}\\\"",
+                "template": "You are an expert music-prompt writer. {tags_context}Improve and translate to English for MusicGen: \\\"{base_prompt}\\\"",
                 "created": datetime.now().isoformat(),
                 "default": True
             },
             {
                 "name": "Creativo",
-                "template": "As a creative music prompt engineer, transform the following natural language prompt into an inspiring, detailed description for MusicGen AI. Make it more vivid and descriptive, and ensure 'tonetxo_style' is included: \\\"{prompt}\\\". Focus on rich textures and emotional depth.",
+                "template": "As a creative music prompt engineer, transform the following base prompt into an inspiring, detailed description for MusicGen AI. Use the context to inspire: {tags_context}Base prompt: \\\"{base_prompt}\\\". Make it more vivid and descriptive.",
                 "created": datetime.now().isoformat(),
                 "default": True
             },
             {
                 "name": "Técnico",
-                "template": "You are a technical music production expert. Analyze and enhance the following prompt for MusicGen, focusing on technical aspects like instrumentation, genre, and production quality. Ensure 'tonetxo_style' is included in the output. Prompt: \\\"{prompt}\\\". Provide a technically detailed, professional music generation instruction.",
+                "template": "You are a technical music production expert. Analyze and enhance the following prompt for MusicGen, focusing on technical aspects like instrumentation, genre, and production quality. Context: {tags_context}Prompt: \\\"{base_prompt}\\\". Provide a technically detailed, professional music generation instruction.",
                 "created": datetime.now().isoformat(),
                 "default": True
             }
@@ -210,28 +210,26 @@ class OllamaIntegration:
             return ["Error: No se pudo conectar a Ollama"]
     def enhance_and_translate_prompt(self, model_name, base_prompt, use_captions, dataset_path, prompt_template=None):
         if not base_prompt.strip(): return "Prompt vacío"
-        
-        # Process the prompt to ensure it includes tonetxo_style
-        processed_prompt = base_prompt
-        if "tonetxo_style" not in processed_prompt.lower():
-            processed_prompt = f"tonetxo_style, {processed_prompt}"
-        
-        # Use the template if provided, otherwise use default
-        if prompt_template:
-            # Replace {prompt} placeholder in the template with the actual prompt
-            ollama_prompt = prompt_template.replace("{prompt}", processed_prompt)
-        else:
-            # Default template if no custom template is provided
-            ollama_prompt = f"You are an expert music-prompt writer. Always ensure 'tonetxo_style' is included in the generated prompt. Improve and translate to English for MusicGen: \\\"{processed_prompt}\\\""
-        
+        tags_context = ""
+        if use_captions and dataset_path:
+            meta = Path(dataset_path) / "metadata.jsonl"
+            if meta.exists():
+                try:
+                    words = set()
+                    with open(meta, "r", encoding="utf-8") as f:
+                        for line in f:
+                            d = json.loads(line)
+                            words.update(re.findall(r"\\b\\w+\\b", d.get("description", "").lower()))
+                    if words: tags_context = "Inspírate en: " + ", ".join(sorted(words)) + ". "
+                except (json.JSONDecodeError, UnicodeDecodeError, IOError) as e:
+                    logger.warning(f"Could not parse metadata.jsonl for context: {e}")
+                    pass
+        ollama_prompt = f"You are an expert music-prompt writer. {tags_context}Improve and translate to English for MusicGen: \"{base_prompt}\""
         try:
             r = self.session.post(f"{self.base_url}/api/generate", json={"model": model_name, "prompt": ollama_prompt, "stream": False}, timeout=60)
             r.raise_for_status()
             out = r.json().get("response", "").strip().replace('"', "")
-            # Ensure tonetxo_style is included in the output
-            if "tonetxo_style" not in out.lower():
-                out = f"tonetxo_style, {out}"
-            return out[0].upper() + out[1:] if out else processed_prompt
+            return out[0].upper() + out[1:] if out else base_prompt
         except requests.exceptions.RequestException as e:
             logger.error(f"Error connecting to Ollama: {e}")
             return "Error en Ollama"
@@ -758,7 +756,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                     gr.Markdown("### 🤖 Plantillas Ollama")
                     ollama_template_select = gr.Dropdown(label="Plantillas Ollama", choices=ollama_prompt_manager.get_prompt_names())
                     ollama_template_name = gr.Textbox(label="Nombre Plantilla")
-                    ollama_template_content = gr.Textbox(label="Contenido Plantilla", lines=4, placeholder="Use {prompt} como marcador para el prompt del usuario")
+                    ollama_template_content = gr.Textbox(label="Contenido Plantilla", lines=4, placeholder="Use {tags_context} y {base_prompt} como marcadores")
                     save_ollama_template_btn = gr.Button("💾 Guardar Plantilla")
                     delete_ollama_template_btn = gr.Button("🗑️ Eliminar Plantilla")
                     use_ollama_template_btn = gr.Button("🔄 Usar Plantilla", variant="primary")
