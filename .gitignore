@@ -5,6 +5,7 @@ __pycache__/
 # Datasets y audio generado
 /augmented_training_data/
 /generated_audio/
+/training_data/
 
 # Directorios de entrenamiento y logs
 /musicgen-dreamboothing/mi_lora_final/

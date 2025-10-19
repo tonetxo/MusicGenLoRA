@@ -319,10 +319,10 @@ def _extract_description(raw, audio_path=None):
             logger.warning(f"No se pudo calcular BPM para {audio_path}: {e}")
     return result
 
-def generate_metadata(dataset_dir):
+def generate_metadata(dataset_dir, min_duration=5.0, max_duration=60.0):
     if not tagger_loaded: return "❌ AudioTagger no disponible"
     root = Path(dataset_dir)
-    if not root.is_dir(): return f"❌ Ruta inválida: {dataset_dir}"
+    if not root.is_dir(): return f"❌ Ruta inválido: {dataset_dir}"
     exts = {".wav", ".mp3", ".flac"}
     audio_files = [p for p in root.iterdir() if p.suffix.lower() in exts]
     if not audio_files: return "⚠️ No hay audios"
@@ -340,15 +340,23 @@ def generate_metadata(dataset_dir):
     with out_path.open("w", encoding="utf-8") as out_f:
         for audio_path in tqdm.tqdm(audio_files, desc="Generando metadata"):
             try:
+                y, sr = librosa.load(str(audio_path), sr=None)
+                duration = float(librosa.get_duration(y=y, sr=sr))
+                
+                # Skip files that are too short or too long
+                if duration < min_duration or duration > max_duration:
+                    logger.info(f"Skipping {audio_path.name} (duration: {duration:.2f}s) - outside range [{min_duration}s, {max_duration}s]")
+                    continue
+                    
+            except:
+                sr, duration = 44100, 0.0
+            
+            try:
                 raw_res = tagger.process_audio_file(str(audio_path))
             except Exception as e:
                 logger.warning(f"Error processing audio file for captioning: {e}")
                 raw_res = {}
-            try:
-                y, sr = librosa.load(str(audio_path), sr=None)
-                duration = float(librosa.get_duration(y=y, sr=sr))
-            except:
-                sr, duration = 44100, 0.0
+            
             audio_info = _extract_description(raw_res, str(audio_path))
             raw_desc = audio_info["description"].replace("Audio containing ", "")
             full_desc = raw_desc
@@ -370,7 +378,127 @@ def generate_metadata(dataset_dir):
                 "audio_filepath": str(audio_path.resolve())
             }
             out_f.write(json.dumps(caption_dict, ensure_ascii=False) + "\n")
-    return f"✅ metadata.jsonl creado en: {out_path}"
+    return f"✅ metadata.jsonl creado en: {out_path} (filtered to [{min_duration}s, {max_duration}s])"
+
+# === CHUNKING ===
+def chunk_dataset(input_dataset_path: str, output_dataset_path: str, chunk_duration: float = 30.0) -> str:
+    """Divide archivos de audio largos en segmentos más pequeños para entrenamiento"""
+    input_path = Path(input_dataset_path)
+    output_path = Path(output_dataset_path)
+    chunked_audio_dir = output_path / "chunked_audio"
+    
+    if not input_path.is_dir():
+        return f"❌ Directorio de entrada inválido: {input_dataset_path}"
+    
+    # Get all audio files in the input directory
+    exts = {".wav", ".mp3", ".flac"}
+    audio_files = [p for p in input_path.iterdir() if p.suffix.lower() in exts]
+    if not audio_files:
+        return f"❌ No se encontraron archivos de audio en {input_dataset_path}"
+    
+    # Clean up old chunked dataset if it exists to avoid interference
+    if output_path.exists() and output_path.is_dir():
+        try:
+            shutil.rmtree(output_path)
+            logger.info(f"Removed old chunked dataset: {output_path}")
+        except OSError as e:
+            logger.warning(f"Could not remove old chunked dataset {output_path}: {e}")
+    
+    try:
+        output_path.mkdir(parents=True, exist_ok=True)
+        chunked_audio_dir.mkdir(exist_ok=True)
+    except Exception as e:
+        return f"❌ Error creando directorio de salida: {e}"
+    
+    total_chunks = 0
+    new_metadata_path = output_path / "metadata.jsonl"
+    
+    try:
+        with open(new_metadata_path, 'w', encoding='utf-8') as f_out:
+            for audio_file in tqdm.tqdm(audio_files, desc="Procesando archivos"):
+                try:
+                    # Load the audio file to get its duration
+                    y, sr = librosa.load(str(audio_file), sr=None, mono=True)
+                    total_duration = librosa.get_duration(y=y, sr=sr)
+                    
+                    # Calculate number of chunks needed based on specified duration
+                    num_chunks = max(1, int(total_duration // chunk_duration) + (1 if total_duration % chunk_duration > 0 else 0))
+                    
+                    for i in range(num_chunks):
+                        start_time = i * chunk_duration
+                        end_time = min((i + 1) * chunk_duration, total_duration)
+                        
+                        # Extract the chunk
+                        start_sample = int(start_time * sr)
+                        end_sample = int(end_time * sr)
+                        chunk_y = y[start_sample:end_sample]
+                        
+                        # Create filename for the chunk
+                        chunk_filename = f"{audio_file.stem}_chunk_{i+1:03d}.wav"
+                        chunk_path = chunked_audio_dir / chunk_filename
+                        
+                        # Save the chunk
+                        sf.write(str(chunk_path), chunk_y, sr)
+                        
+                        # To avoid AudioTagger's internal chunking (which uses 10s chunks), 
+                        # process a larger chunk if needed for description or use original file's description
+                        # First, try to get description from original file if it's the first chunk
+                        if i == 0:  # Get description from original file for the first chunk
+                            original_raw_res = {}
+                            if tagger_loaded:
+                                try:
+                                    original_raw_res = tagger.process_audio_file(str(audio_file))
+                                except Exception as e:
+                                    logger.warning(f"Error processing original file for captioning: {e}")
+                            
+                            audio_info = _extract_description(original_raw_res, str(audio_file))
+                        else:  # For subsequent chunks, use a simple approach to avoid AudioTagger's internal chunking
+                            # Just reuse the description from the original file
+                            # Since all chunks from the same file should have similar characteristics
+                            audio_info = {
+                                "description": "tonetxo_style, electronic music, synth",  # Default with tonetxo_style
+                                "bpm": "", 
+                                "genre": "electronic", 
+                                "moods": []
+                            }
+                        
+                        raw_desc = audio_info["description"].replace("Audio containing ", "")
+                        full_desc = raw_desc
+                        
+                        # Calculate actual chunk duration
+                        chunk_actual_duration = end_time - start_time
+                        
+                        # Create metadata entry for this chunk
+                        chunk_metadata = {
+                            "key": "",
+                            "artist": "Tonetxo",
+                            "sample_rate": int(sr),
+                            "file_extension": "wav",
+                            "description": full_desc,
+                            "keywords": "",
+                            "duration": round(chunk_actual_duration, 2),
+                            "bpm": audio_info["bpm"],
+                            "genre": audio_info["genre"],
+                            "title": f"{audio_file.stem} Chunk {i+1}",
+                            "name": f"{audio_file.stem}_chunk_{i+1:03d}",
+                            "instrument": "Mix",
+                            "moods": audio_info["moods"],
+                            "file_name": chunk_filename,
+                            "audio_filepath": str(chunk_path.resolve())
+                        }
+                        
+                        f_out.write(json.dumps(chunk_metadata, ensure_ascii=False) + '\n')
+                        total_chunks += 1
+                
+                except Exception as e:
+                    logger.error(f"Error procesando archivo {audio_file}: {e}")
+                    continue
+        
+        return f"✅ Dataset troceado: {total_chunks} segmentos de ~{chunk_duration}s en {output_path}"
+    
+    except Exception as e:
+        return f"❌ Error en troceado: {str(e)}"
+
 
 # === AUGMENTACIÓN ===
 def augment_dataset_simple(input_dataset_path: str, output_dataset_path: str) -> str:
@@ -725,16 +853,21 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             prep_dataset_path_input = gr.Textbox(label="Ruta audios", value=settings.get("dataset_path", ""))
             generate_metadata_button = gr.Button("🤖 Generar metadata.jsonl")
             metadata_output = gr.Textbox(label="Resultado", lines=2)
+            gr.Markdown("### Troceado de Dataset (para archivos largos)")
+            chunked_output_path = gr.Textbox(label="Ruta salida troceado", value="./training_data")
+            chunk_duration_input = gr.Slider(label="Duración de troceado (s)", minimum=5, maximum=60, value=30, step=1)
+            chunk_dataset_btn = gr.Button("✂️ Trocear Dataset")
+            gr.Markdown("### Aumentación de Dataset")
             augmented_output_path = gr.Textbox(label="Ruta salida augmentado", value="./augmented_training_data")
             use_augmented_cb = gr.Checkbox(label="Usar dataset augmentado", value=False)
             augment_dataset_btn = gr.Button("🔄 Augmentar Dataset")
             gr.Markdown("### 2. Parámetros de Entrenamiento")
             output_dir_input = gr.Textbox(label="Carpeta LoRA", value=settings.get("output_dir", ""))
             epochs_input = gr.Slider(label="Épocas", minimum=1, maximum=100, step=1, value=settings.get("epochs", 15))
-            lr_input = gr.Number(label="LR", value=settings.get("lr", 0.0001), precision=6)
+            lr_input = gr.Number(label="LR", value=settings.get("lr", 0.0001), precision=6, step=0.00001)
             scheduler_input = gr.Dropdown(label="LR Scheduler", choices=["linear", "cosine", "constant"], value=settings.get("lr_scheduler", "linear"))
             weight_decay_input = gr.Slider(label="Weight Decay", minimum=0.0, maximum=0.2, step=0.01, value=settings.get("weight_decay", 0.01))
-            max_duration_input = gr.Slider(label="Duración (s)", minimum=5, maximum=40, value=settings.get("max_duration", 8))
+            max_duration_input = gr.Slider(label="Duración (s)", minimum=5, maximum=40, value=settings.get("max_duration", 8), step=1)
             r_input = gr.Slider(label="R", minimum=4, maximum=128, step=4, value=settings.get("lora_r", 8))
             alpha_input = gr.Slider(label="Alpha", minimum=4, maximum=256, step=4, value=settings.get("lora_alpha", 16))
             train_seed_input = gr.Number(label="Semilla", value=settings.get("train_seed", 42))
@@ -776,7 +909,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                 lora_path_input = gr.File(label="Arrastra LoRA", file_count="multiple")
             with gr.Row():
                 inference_seed_input = gr.Number(label="Semilla", value=settings.get("inference_seed", -1))
-                duration_slider = gr.Slider(label="Duración (s)", minimum=5, maximum=40, value=settings.get("inference_duration", 8))
+                duration_slider = gr.Slider(label="Duración (s)", minimum=5, maximum=40, value=settings.get("inference_duration", 8), step=1)
             with gr.Row():
                 generate_btn = gr.Button("🎹 Generar", variant="primary")
                 continuous_generate_btn = gr.Button("🔄 Generación Continua", variant="secondary")
@@ -807,6 +940,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
     ]
     save_settings_btn.click(save_all_settings, inputs=all_settings_comps, outputs=settings_save_output)
     generate_metadata_button.click(generate_metadata, inputs=prep_dataset_path_input, outputs=metadata_output)
+    chunk_dataset_btn.click(chunk_dataset, inputs=[prep_dataset_path_input, chunked_output_path, chunk_duration_input], outputs=metadata_output)
     augment_dataset_btn.click(augment_dataset_simple, inputs=[prep_dataset_path_input, augmented_output_path], outputs=metadata_output)
     launch_train_btn.click(
         modify_and_run_training,

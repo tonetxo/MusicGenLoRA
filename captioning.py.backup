@@ -327,34 +327,7 @@ class AudioTagger:
 
     def clean_label(self, label: str) -> str:
         """Limpiar y normalizar etiquetas para mejor legibilidad musical"""
-        import re
-        
         label_lower = label.lower().replace("_", " ").replace("-", " ")
-        
-        # Corrección de errores tipográficos comunes
-        typo_corrections = {
-            "drumss": "drums",
-            "synthesizeresizer": "synthesizer",
-            "synthesizerizer": "synthesizer",
-            "synthesizers": "synthesizer",
-            "pianos": "piano",
-            "guitars": "guitar",
-            "organs": "organ",
-            "violinss": "violin",
-            "flutess": "flute",
-            "trumpetss": "trumpet",
-            "vocalsss": "vocals",
-            "effectss": "effects",
-        }
-        
-        # Aplicar correcciones de errores tipográficos
-        for typo, correct in typo_corrections.items():
-            label_lower = label_lower.replace(typo, correct)
-        
-        # Corrección de errores por duplicación de caracteres (como drumss -> drums)
-        # Buscar palabras que terminan con una letra repetida
-        label_lower = re.sub(r'\b(\w+)(\w)\2\b', r'\1\2', label_lower)  # drumss -> drums
-        label_lower = re.sub(r'\b(\w+)(\w)(\w)\3\b', r'\1\2\3', label_lower)  # synthesizeresizer -> synthesizer
         
         # Diccionario de limpieza y traducción específico para música
         cleanup_dict = {
