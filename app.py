@@ -500,6 +500,126 @@ def chunk_dataset(input_dataset_path: str, output_dataset_path: str, chunk_durat
         return f"❌ Error en troceado: {str(e)}"
 
 
+# === POST-PROCESAMIENTO DE DESCRIPCIONES ===
+def postprocess_descriptions(dataset_path: str, use_ollama: bool = True, ollama_model: str = None) -> str:
+    """Mejora las descripciones en metadata.jsonl para mayor consistencia y riqueza"""
+    import json
+    from pathlib import Path
+    import time
+    
+    metadata_path = Path(dataset_path) / "metadata.jsonl"
+    if not metadata_path.exists():
+        return f"❌ No se encontró metadata.jsonl en {dataset_path}"
+    
+    # Leer el metadata actual
+    entries = []
+    with open(metadata_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            if line.strip():
+                entries.append(json.loads(line))
+    
+    if not entries:
+        return "❌ No hay entradas en el metadata para procesar"
+    
+    yield f"📊 Cargando {len(entries)} entradas de metadata..."
+    
+    # Agrupar entradas por archivo original (basado en el nombre base)
+    grouped_entries = {}
+    for entry in entries:
+        # Extraer el nombre base del archivo original del chunk
+        original_name = "_".join(entry["name"].split("_")[:-2]) if "_chunk_" in entry["name"] else entry["name"]
+        if original_name not in grouped_entries:
+            grouped_entries[original_name] = []
+        grouped_entries[original_name].append(entry)
+    
+    yield f"📋 Identificados {len(grouped_entries)} grupos de archivos originales"
+    
+    # Procesar cada grupo de chunks del mismo archivo original
+    updated_count = 0
+    total_groups = len(grouped_entries)
+    processed_groups = 0
+    
+    for original_name, chunk_entries in grouped_entries.items():
+        processed_groups += 1
+        yield f"🔄 Procesando grupo {processed_groups}/{total_groups}: {original_name} ({len(chunk_entries)} chunks)"
+        
+        # Tomar la descripción más detallada como base (generalmente del primer chunk)
+        best_description = chunk_entries[0]["description"]  # Comenzamos con el primer chunk
+        
+        # Encontrar la descripción más detallada entre todos los chunks
+        for entry in chunk_entries:
+            if len(entry["description"]) > len(best_description):
+                best_description = entry["description"]
+        
+        # Si usamos Ollama, mejorar la descripción base
+        if use_ollama and ollama_model:
+            try:
+                # Plantilla más específica para descripciones musicales concisas
+                ollama_template = "Generate only a clean MusicGen prompt in English that includes 'tonetxo_style' at the beginning. Focus on instruments, genre, mood, and production style. Keep it concise and specific: \\\"{prompt}\\\". Output only the prompt, nothing else. Do not include any explanations, translations, or formatting."
+                enhanced_description = ollama.enhance_and_translate_prompt(
+                    ollama_model, best_description, False, "", ollama_template
+                )
+                if enhanced_description and "Error" not in enhanced_description:
+                    # Limpiar cualquier contenido extra que Ollama haya incluido
+                    import re
+                    # Buscar posibles formatos de respuesta y extraer solo la descripción
+                    if "**" in enhanced_description or "Final Answer:" in enhanced_description:
+                        # Extraer solo la parte principal del prompt
+                        lines = enhanced_description.split('\n')
+                        main_prompt = []
+                        for line in lines:
+                            if line.strip() and not any(marker in line for marker in ['**', 'Final Answer:', 'Option', 'Translation:', 'Justification:', '- The']):
+                                if line.strip() not in ['```', '```', '```', '```']:  # Ignorar bloques de código
+                                    main_prompt.append(line.strip())
+                        enhanced_description = '. '.join(main_prompt).strip()
+                    
+                    # Asegurarse de que 'tonetxo_style' esté incluido al principio
+                    if "tonetxo_style" not in enhanced_description.lower():
+                        enhanced_description = f"tonetxo_style, {enhanced_description}"
+                    
+                    # Limpiar la descripción de posibles explicaciones adicionales
+                    if "tonetxo_style, **" in enhanced_description or "**" in enhanced_description:
+                        # Eliminar marcadores de formato
+                        enhanced_description = re.sub(r'\*\*.*?\*\*', '', enhanced_description)  # Remover **text**
+                        enhanced_description = re.sub(r'```.*?```', '', enhanced_description, flags=re.DOTALL)  # Remover bloques de código
+                        enhanced_description = enhanced_description.replace("Option 1:", "").replace("Option 2:", "").replace("Option 3:", "")
+                        enhanced_description = enhanced_description.replace("Translation:", "").replace("Justification:", "")
+                        enhanced_description = enhanced_description.strip()
+                    
+                    best_description = enhanced_description
+                else:
+                    yield f"⚠️ Ollama no pudo mejorar la descripción para {original_name}, usando la original"
+            except Exception as e:
+                logger.warning(f"Error usando Ollama para mejorar descripciones: {e}")
+                yield f"⚠️ Error con Ollama para {original_name}: {str(e)[:50]}..., usando original"
+        
+        # Aplicar la mejor descripción a todos los chunks del mismo archivo original
+        for entry in chunk_entries:
+            # Conservar el 'tonetxo_style' y aplicar la descripción mejorada
+            if "tonetxo_style" not in best_description.lower():
+                best_description = f"tonetxo_style, {best_description}"
+            
+            entry["description"] = best_description
+            updated_count += 1
+        
+        # Pequeña pausa para no sobrecargar Ollama si está habilitado
+        if use_ollama:
+            time.sleep(0.1)
+    
+    # Guardar el metadata actualizado
+    backup_path = metadata_path.with_suffix('.jsonl.backup')
+    import shutil
+    shutil.copy2(metadata_path, backup_path)  # Crear backup
+    
+    yield f"💾 Guardando {updated_count} descripciones actualizadas..."
+    
+    with open(metadata_path, 'w', encoding='utf-8') as f:
+        for entry in entries:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    
+    yield f"✅ {updated_count} descripciones actualizadas en {dataset_path}/metadata.jsonl (backup en {backup_path})"
+
+
 # === AUGMENTACIÓN ===
 def augment_dataset_simple(input_dataset_path: str, output_dataset_path: str) -> str:
     input_path = Path(input_dataset_path)
@@ -861,6 +981,10 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             augmented_output_path = gr.Textbox(label="Ruta salida augmentado", value="./augmented_training_data")
             use_augmented_cb = gr.Checkbox(label="Usar dataset augmentado", value=False)
             augment_dataset_btn = gr.Button("🔄 Augmentar Dataset")
+            gr.Markdown("### Post-procesamiento de Descripciones")
+            descriptions_dataset_path = gr.Textbox(label="Ruta dataset para mejorar descripciones", value="./training_data")
+            use_ollama_for_descriptions = gr.Checkbox(label="Usar Ollama para mejorar descripciones", value=True)
+            postprocess_descriptions_btn = gr.Button("📝 Mejorar Descripciones", variant="secondary")
             gr.Markdown("### 2. Parámetros de Entrenamiento")
             output_dir_input = gr.Textbox(label="Carpeta LoRA", value=settings.get("output_dir", ""))
             epochs_input = gr.Slider(label="Épocas", minimum=1, maximum=100, step=1, value=settings.get("epochs", 15))
@@ -942,6 +1066,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
     generate_metadata_button.click(generate_metadata, inputs=prep_dataset_path_input, outputs=metadata_output)
     chunk_dataset_btn.click(chunk_dataset, inputs=[prep_dataset_path_input, chunked_output_path, chunk_duration_input], outputs=metadata_output)
     augment_dataset_btn.click(augment_dataset_simple, inputs=[prep_dataset_path_input, augmented_output_path], outputs=metadata_output)
+    postprocess_descriptions_btn.click(postprocess_descriptions, inputs=[descriptions_dataset_path, use_ollama_for_descriptions, ollama_model_dd], outputs=metadata_output)
     launch_train_btn.click(
         modify_and_run_training,
         inputs=[
