@@ -8,6 +8,7 @@ __pycache__/
 
 # Directorios de entrenamiento y logs
 /musicgen-dreamboothing/mi_lora_final/
+/musicgen-dreamboothing/mi_lora_final_1/
 /musicgen-dreamboothing/lora_*/
 /musicgen-dreamboothing/wandb/
 /musicgen-dreamboothing/checkpoint-*/

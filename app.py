@@ -531,8 +531,8 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
     active_model_state = gr.State(value=initial_state)
     continuous_generation_state = gr.State(value={'is_running': False})
 
-    # Timer declarado aquí (dentro de Blocks)
-    timer = gr.Timer(10)
+    # Timer declarado aquí (dentro de Blocks) - initially inactive
+    timer = gr.Timer(10, active=False)
 
     with gr.Tabs():
         with gr.TabItem("🛠️ Entrenar LoRA"):
@@ -646,11 +646,11 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
     # === NUEVO: GENERACIÓN CONTINUA CON TIMER ===
     def start_continuous_timer(state):
         state["is_running"] = True
-        return state, "🔄 Generación continua iniciada..."
+        return state, gr.Timer(active=True), "🔄 Generación continua iniciada..."
 
     def stop_continuous_timer(state):
         state["is_running"] = False
-        return state, "🛑 Generación continua detenida"
+        return state, gr.Timer(active=False), "🛑 Generación continua detenida"
 
     def timer_step(
         continuous_state,
@@ -680,7 +680,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
 
     # Actualizar el timer cuando cambie el intervalo
     interval_input.change(
-        lambda x: gr.Timer(active=False) if x <= 0 else gr.Timer(x),
+        lambda x: gr.Timer(active=False) if x <= 0 else gr.Timer(value=x, active=False),
         inputs=interval_input,
         outputs=timer
     )
@@ -688,13 +688,13 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
     continuous_generate_btn.click(
         start_continuous_timer,
         inputs=[continuous_generation_state],
-        outputs=[continuous_generation_state, status_output]
+        outputs=[continuous_generation_state, timer, status_output]
     )
 
     stop_generate_btn.click(
         stop_continuous_timer,
         inputs=[continuous_generation_state],
-        outputs=[continuous_generation_state, status_output]
+        outputs=[continuous_generation_state, timer, status_output]
     )
 
     timer.tick(
