@@ -51,8 +51,10 @@ def load_settings():
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                 overrides = json.load(f)
                 defaults.update(overrides)
-        except:
-            pass
+        except (json.JSONDecodeError, UnicodeDecodeError, FileNotFoundError) as e:
+            logger.warning(f"Could not load settings file {SETTINGS_FILE}: {e}")
+        except Exception as e:
+            logger.warning(f"Unexpected error loading settings: {e}")
     return defaults
 
 def save_settings(settings):
@@ -76,8 +78,9 @@ class PromptManager:
             try:
                 with open(self.prompts_file, "r", encoding="utf-8") as f:
                     return json.load(f)
-            except:
-                pass
+            except (json.JSONDecodeError, UnicodeDecodeError, FileNotFoundError) as e:
+                logger.warning(f"Could not load prompts file {self.prompts_file}: {e}")
+                return []
         return []
     def save_prompts(self):
         with open(self.prompts_file, "w", encoding="utf-8") as f:
@@ -108,8 +111,14 @@ class OllamaIntegration:
     def get_available_models(self):
         try:
             r = self.session.get(f"{self.base_url}/api/tags", timeout=5)
+            r.raise_for_status()  # Raises an HTTPError for bad responses
             return [m["name"] for m in r.json().get("models", [])] if r.status_code == 200 else []
-        except: return ["Error: No se pudo conectar a Ollama"]
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error connecting to Ollama: {e}")
+            return ["Error: No se pudo conectar a Ollama"]
+        except (KeyError, ValueError) as e:
+            logger.error(f"Error parsing Ollama response: {e}")
+            return ["Error: No se pudo conectar a Ollama"]
     def enhance_and_translate_prompt(self, model_name, base_prompt, use_captions, dataset_path):
         if not base_prompt.strip(): return "Prompt vacío"
         tags_context = ""
@@ -123,13 +132,21 @@ class OllamaIntegration:
                             d = json.loads(line)
                             words.update(re.findall(r"\b\w+\b", d.get("description", "").lower()))
                     if words: tags_context = "Inspírate en: " + ", ".join(sorted(words)) + ". "
-                except: pass
+                except (json.JSONDecodeError, UnicodeDecodeError, IOError) as e:
+                    logger.warning(f"Could not parse metadata.jsonl for context: {e}")
+                    pass
         ollama_prompt = f"You are an expert music-prompt writer. {tags_context}Improve and translate to English for MusicGen: \"{base_prompt}\""
         try:
             r = self.session.post(f"{self.base_url}/api/generate", json={"model": model_name, "prompt": ollama_prompt, "stream": False}, timeout=60)
+            r.raise_for_status()
             out = r.json().get("response", "").strip().replace('"', "")
             return out[0].upper() + out[1:] if out else base_prompt
-        except: return "Error en Ollama"
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error connecting to Ollama: {e}")
+            return "Error en Ollama"
+        except (KeyError, ValueError) as e:
+            logger.error(f"Error parsing Ollama response: {e}")
+            return "Error en Ollama"
     def unload_ollama_model(self, model_name):
         try:
             result = subprocess.run(
@@ -172,7 +189,9 @@ tagger_loaded = False
 try:
     msg = tagger.load_model()
     if "Error" not in msg: tagger_loaded = True
-except: pass
+except Exception as e:
+    logger.warning(f"Could not load AudioTagger model: {e}")
+    pass
 
 def _extract_description(raw, audio_path=None):
     result = {
@@ -215,12 +234,23 @@ def generate_metadata(dataset_dir):
     exts = {".wav", ".mp3", ".flac"}
     audio_files = [p for p in root.iterdir() if p.suffix.lower() in exts]
     if not audio_files: return "⚠️ No hay audios"
+    
+    # Remove old metadata.jsonl if it exists to avoid interference
+    old_metadata_path = root / "metadata.jsonl"
+    if old_metadata_path.exists():
+        try:
+            old_metadata_path.unlink()  # Remove the old file
+            logger.info(f"Removed old metadata file: {old_metadata_path}")
+        except OSError as e:
+            logger.warning(f"Could not remove old metadata file {old_metadata_path}: {e}")
+    
     out_path = root / "metadata.jsonl"
     with out_path.open("w", encoding="utf-8") as out_f:
         for audio_path in tqdm.tqdm(audio_files, desc="Generando metadata"):
             try:
                 raw_res = tagger.process_audio_file(str(audio_path))
-            except:
+            except Exception as e:
+                logger.warning(f"Error processing audio file for captioning: {e}")
                 raw_res = {}
             try:
                 y, sr = librosa.load(str(audio_path), sr=None)
@@ -260,6 +290,16 @@ def augment_dataset_simple(input_dataset_path: str, output_dataset_path: str) ->
     metadata_file = input_path / "metadata.jsonl"
     if not metadata_file.exists():
         return f"❌ No se encontró 'metadata.jsonl' en {input_dataset_path}"
+    
+    # Clean up old augmented dataset if it exists to avoid interference
+    if output_path.exists() and output_path.is_dir():
+        try:
+            # Remove the entire output directory and recreate it
+            shutil.rmtree(output_path)
+            logger.info(f"Removed old augmented dataset: {output_path}")
+        except OSError as e:
+            logger.warning(f"Could not remove old augmented dataset {output_path}: {e}")
+    
     try:
         output_path.mkdir(parents=True, exist_ok=True)
         augmented_audio_dir.mkdir(exist_ok=True)
@@ -270,18 +310,24 @@ def augment_dataset_simple(input_dataset_path: str, output_dataset_path: str) ->
         try:
             augmented_samples.append((librosa.effects.pitch_shift(y, sr=sr, n_steps=-1), sr, f"{filename_prefix}_pitch_down1"))
             augmented_samples.append((librosa.effects.pitch_shift(y, sr=sr, n_steps=1), sr, f"{filename_prefix}_pitch_up1"))
-        except: pass
+        except Exception as e:
+            logger.warning(f"Pitch shifting failed: {e}")
+            pass
         augmented_samples.append((np.clip(y * 0.9, -1.0, 1.0), sr, f"{filename_prefix}_vol_down"))
         augmented_samples.append((np.clip(y * 1.1, -1.0, 1.0), sr, f"{filename_prefix}_vol_up"))
         try:
             augmented_samples.append((librosa.effects.time_stretch(y, rate=0.9), sr, f"{filename_prefix}_stretch_slow"))
             augmented_samples.append((librosa.effects.time_stretch(y, rate=1.1), sr, f"{filename_prefix}_stretch_fast"))
-        except: pass
+        except Exception as e:
+            logger.warning(f"Time stretching failed: {e}")
+            pass
         try:
             noise = np.random.randn(len(y))
             y_noise = y + 0.005 * noise
             augmented_samples.append((np.clip(y_noise, -1.0, 1.0), sr, f"{filename_prefix}_noise"))
-        except: pass
+        except Exception as e:
+            logger.warning(f"Noise augmentation failed: {e}")
+            pass
         return augmented_samples
     total_samples = 0
     new_metadata_path = output_path / "metadata.jsonl"
@@ -428,7 +474,8 @@ def switch_model_and_state(lora_files: List[str]):
     try:
         base_model.to("cpu")
         torch.cuda.empty_cache()
-    except: pass
+    except Exception as e:
+        logger.warning(f"Error moving model to CPU or clearing cache: {e}")
     if not lora_files or all(f is None for f in lora_files):
         del base_model
         torch.cuda.empty_cache()
@@ -447,6 +494,20 @@ def switch_model_and_state(lora_files: List[str]):
         base_model = MusicgenForConditionalGeneration.from_pretrained(MODEL_ID, torch_dtype=torch.float16)
         return {"model": base_model, "lora_path": None}, f"❌ Error LoRA: {str(e)[:100]}"
 
+def normalize_audio_for_output(audio_data):
+    """Normalize audio data for output as WAV file."""
+    if audio_data.ndim == 2 and audio_data.shape[0] <= 2:
+        # If stereo channels are in rows, transpose to columns
+        audio_data = audio_data.T
+    elif audio_data.ndim > 2:
+        # If there are multiple channels, take the first one
+        audio_data = audio_data[0] if audio_data.shape[0] > 1 else audio_data.squeeze(0)
+    
+    # Convert to int16 format for WAV
+    audio_data = np.clip(audio_data, -1.0, 1.0)  # Ensure values are in [-1, 1]
+    audio_data = (audio_data * 32767).astype(np.int16)
+    return audio_data
+
 def generate_music_with_state(
     current_state, lora_path_from_file_input, prompt, duration, seed, guidance, temp, topk, topp
 ):
@@ -462,7 +523,12 @@ def generate_music_with_state(
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
     inputs = processor(text=[prompt], return_tensors="pt").to("cuda")
-    max_tokens = min(int(duration * 50), 2048)
+    
+    # Calculate max tokens: 50 tokens per second of audio (MusicGen specific)
+    MAX_TOKENS_PER_SECOND = 50
+    MAX_TOTAL_TOKENS = 2048
+    max_tokens = min(int(duration * MAX_TOKENS_PER_SECOND), MAX_TOTAL_TOKENS)
+    
     with torch.no_grad():
         audio_codes = active_model.generate(
             **inputs,
@@ -476,28 +542,40 @@ def generate_music_with_state(
     active_model = active_model.to("cpu")
     torch.cuda.empty_cache()
     audio_np = audio_codes[0].cpu().numpy()
-    if audio_np.ndim == 2 and audio_np.shape[0] <= 2:
-        audio_np = audio_np.T
-    elif audio_np.ndim == 1:
-        pass
-    else:
-        audio_np = audio_np[0] if audio_np.shape[0] > 1 else audio_np
-    audio_np = (audio_np * 32767).astype(np.int16)
+    audio_np = normalize_audio_for_output(audio_np)
     return current_state, "✅ Generado", (32000, audio_np)
 
 def save_generated_audio(audio_data, output_dir="./generated_audio"):
-    if not audio_data: return "❌ No hay audio"
-    sr, audio_np = audio_data
-    if audio_np is None or len(audio_np) == 0: return "❌ Audio vacío"
+    if not audio_data: 
+        return "❌ No hay audio"
+    try:
+        sr, audio_np = audio_data
+    except (ValueError, TypeError):
+        return "❌ Formato de audio inválido"
+    
+    if audio_np is None or len(audio_np) == 0: 
+        return "❌ Audio vacío"
+    
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filepath = os.path.join(output_dir, f"musicgen_{timestamp}.wav")
+    
     try:
-        if audio_np.ndim == 2 and audio_np.shape[1] > 2:
-            audio_np = audio_np[:, :2]
+        # Ensure audio has proper format for saving
+        if audio_np.ndim == 2:
+            # Limit to stereo (2 channels max)
+            if audio_np.shape[1] > 2:
+                audio_np = audio_np[:, :2]
+            elif audio_np.shape[0] > 2:  # If channels are in rows
+                audio_np = audio_np[:2, :].T
+        # Convert to appropriate format if needed
+        if audio_np.dtype != np.int16:
+            audio_np = (audio_np * 32767).astype(np.int16)
+        
         sf.write(filepath, audio_np, sr)
         return f"✅ Guardado: {filepath}"
     except Exception as e:
+        logger.error(f"Error saving audio file: {e}")
         return f"❌ Error: {e}"
 
 def save_all_settings(dataset_path, output_dir, epochs, lr, scheduler, weight_decay, max_duration, lora_r, lora_alpha, train_seed, inference_prompt, inference_duration, inference_seed, guidance, temp, topk, topp, ollama_model):
@@ -587,7 +665,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                 stop_generate_btn = gr.Button("🛑 Detener", variant="stop")
             
             # 👇 Campo de intervalo AÑADIDO aquí
-            interval_input = gr.Number(label=".Intervalo entre generaciones (segundos)", value=10, minimum=1, step=1)
+            interval_input = gr.Number(label="Intervalo entre generaciones (segundos)", value=10, minimum=1, step=1)
 
             status_output = gr.Textbox(label="Estado", value="✅ Modelo Base")
             with gr.Accordion("🎛️ Parámetros de Generación (Modificables en tiempo real)", open=True):
